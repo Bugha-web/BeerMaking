@@ -218,6 +218,26 @@ def find_inventory_item(inv_df, patterns):
             return r
     return None
 
+def delete_rows_where(sheet_name, col_name, value):
+    """Delete every row in a worksheet whose col_name equals value.
+    Collects 1-based row indices first, then deletes bottom-up so indices
+    don't shift. Returns the number of deleted rows."""
+    w = ws(sheet_name)
+    values = w.get_all_values()
+    if not values:
+        return 0
+    try:
+        ci = values[0].index(col_name)
+    except ValueError:
+        return 0
+    idxs = [i + 1 for i, r in enumerate(values)
+            if i > 0 and len(r) > ci and r[ci] == value]
+    for i in reversed(idxs):
+        w.delete_rows(i)
+    if idxs:
+        get_df.clear()
+    return len(idxs)
+
 def is_brew_finished(brew_id, headers_df):
     """Single source of truth for 'finished': FG_Date is set (i.e. the
     'ეს არის FG' checkbox was used). Used by the edit-lock gate."""
@@ -389,6 +409,19 @@ if page == "📦 Inventory":
             })
             st.success(f"{item} დაემატა.")
             st.rerun()
+
+    if not df.empty:
+        with st.expander("🗑️ ნედლეულის წაშლა"):
+            st.warning("ეს წაშლის item-ს INVENTORY-დან. ისტორიული BREW_STEPS "
+                       "ჩანაწერები უცვლელი რჩება. ქმედება შეუქცევადია.")
+            item_to_delete = st.selectbox("აირჩიე", df["Item"].tolist(), key="inv_del_sel")
+            confirm = st.checkbox(f"დავადასტურებ „{item_to_delete}“-ის წაშლას",
+                                  key="inv_del_confirm")
+            if st.button("წაშლა", key="inv_del_btn") and confirm:
+                n = delete_rows_where("INVENTORY", "Item", item_to_delete)
+                get_df.clear()
+                st.success(f"წაშლილია ({n} row).")
+                st.rerun()
 
 # ============================================================
 # PAGE 2 — BREW
@@ -582,6 +615,27 @@ else:
                 with st.container(border=True, key="ovcard-outcome"):
                     st.markdown("#### 📝 შედეგის შენიშვნა")
                     st.write(_show(row.get("Outcome_Note")))
+
+            # --- delete brew (cascade, double confirmation) ---
+            with st.expander("🗑️ ხარშვის წაშლა"):
+                st.warning("ეს წაშლის ამ ხარშვას ყველა Sheet-იდან — Header, Steps, "
+                           "Water, Gravity. ეს ქმედება შეუქცევადია.")
+                brew_display = str(row.get("Display_Name", "") or "").strip() or choice
+                confirm_text = st.text_input(
+                    f"დასადასტურებლად ჩაწერე ხარშვის სახელი: „{brew_display}“",
+                    key=f"del_confirm_{bid}")
+                if st.button("წაშლა საბოლოოდ", key=f"del_btn_{bid}"):
+                    if confirm_text.strip() != brew_display:
+                        st.error("სახელი არ ემთხვევა — წაშლა არ შესრულდა.")
+                    else:
+                        deleted = {}
+                        for sheet in ["BREW_STEPS", "WATER_TREATMENT",
+                                      "BREW_GRAVITY_LOG", "BREW_HEADER"]:
+                            deleted[sheet] = delete_rows_where(sheet, "Brew_ID", bid)
+                        get_df.clear()
+                        st.success("წაშლილია: " + ", ".join(
+                            f"{s} −{n}" for s, n in deleted.items()))
+                        st.rerun()
 
         # ---- WATER TAB ----
         if st.session_state.brew_tab == "💧 წყალი":
