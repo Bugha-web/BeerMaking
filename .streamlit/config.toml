@@ -1,0 +1,38 @@
+# ============================================================
+# BUGHASHVILI Brew Journal — visual design system
+# Palette + typography live here (version-stable native theming).
+# A single small CSS block in streamlit_app.py handles only what
+# config.toml cannot (metric emphasis, card polish, active-nav highlight).
+# Beer-amber accent on a warm dark base.
+# ============================================================
+[theme]
+base = "dark"
+primaryColor = "#C6821B"                 # deep amber — buttons/active (readable w/ white text)
+backgroundColor = "#15120D"              # warm near-black
+secondaryBackgroundColor = "#211B12"     # cards, widgets, code
+textColor = "#ECE3D2"                    # warm off-white
+borderColor = "#3B2F1E"                  # warm dark border
+linkColor = "#E0A23C"                    # brighter amber for links
+codeBackgroundColor = "#1B160F"
+baseRadius = "10px"
+showWidgetBorder = true
+showSidebarBorder = true
+baseFontSize = 15
+headingFontSizes = ["30px", "23px", "19px", "16px", "14px", "12px"]
+headingFontWeights = [700, 600, 600, 600, 500, 500]
+
+# semantic status colors
+greenColor = "#5BA568"
+orangeColor = "#D9902B"
+yellowColor = "#E0B93C"
+redColor = "#C8553D"
+
+# chart series (gravity curve etc.) — amber-led palette
+chartCategoricalColors = ["#E0A23C", "#5BA568", "#C8553D", "#8A6FB0", "#4F93B8", "#D9902B", "#9A8C7A"]
+
+[theme.sidebar]
+backgroundColor = "#100D08"
+secondaryBackgroundColor = "#1B160F"
+borderColor = "#3B2F1E"
+textColor = "#ECE3D2"
+primaryColor = "#E0A23C"

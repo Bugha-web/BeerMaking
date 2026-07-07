@@ -8,6 +8,58 @@ import uuid
 st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # ============================================================
+# GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
+# Colors/typography come from .streamlit/config.toml; this only covers
+# what config can't express. Selectors are stable: data-testid (Streamlit
+# public test hooks) and .st-key-* (from widget key=), NOT version-specific
+# emotion hashes.
+# ============================================================
+st.markdown("""
+<style>
+/* card polish: subtle warm fill on overview cards (keyed = version-stable) */
+[class*="st-key-ovcard-"] {
+    background: rgba(224, 162, 60, 0.04);
+}
+/* emphasized numbers (OG/FG/Eff/ABV) — big, beer-amber */
+[data-testid="stMetricValue"] {
+    font-size: 1.9rem;
+    font-weight: 700;
+    color: #E9A93C;
+}
+[data-testid="stMetricLabel"] p {
+    font-size: 0.78rem;
+    letter-spacing: 0.04em;
+    opacity: 0.72;
+}
+/* brew page: horizontal radio styled as tabs (moved here from inline
+   so it loads once, not on every brew-page render) */
+.st-key-brew_tab_radio div[role="radiogroup"] { gap: 4px; }
+.st-key-brew_tab_radio div[role="radiogroup"] label {
+    border: 1px solid rgba(224, 162, 60, 0.30);
+    border-bottom: none;
+    border-radius: 10px 10px 0 0;
+    padding: 6px 16px;
+    background: rgba(255, 255, 255, 0.02);
+}
+.st-key-brew_tab_radio div[role="radiogroup"] label:has(input:checked) {
+    background: rgba(224, 162, 60, 0.16);
+    border-color: rgba(224, 162, 60, 0.6);
+}
+.st-key-brew_tab_radio div[role="radiogroup"] label > div:first-child { display: none; }
+/* sidebar nav: highlight the selected page */
+.st-key-nav_radio div[role="radiogroup"] label {
+    padding: 6px 10px;
+    border-radius: 8px;
+    margin-bottom: 2px;
+}
+.st-key-nav_radio div[role="radiogroup"] label:has(input:checked) {
+    background: rgba(224, 162, 60, 0.15);
+    box-shadow: inset 3px 0 0 #E0A23C;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================
 # CONNECTION — reads credentials + sheet id from Streamlit secrets
 # Local: .streamlit/secrets.toml
 # Cloud: App settings -> Secrets (same format, pasted in)
@@ -81,6 +133,73 @@ def _num(v, default=0.0):
         return float(str(v).replace("%", "").replace(",", "").strip())
     except (ValueError, TypeError):
         return default
+
+UNIT_TO_GRAMS_OR_ML = {"kg": 1000, "g": 1, "l": 1000, "ml": 1, "pack": 1}
+# units are only interconvertible inside the same group; anything across
+# groups (or unknown) returns None so we never deduct blindly
+_UNIT_GROUP = {"kg": "mass", "g": "mass", "l": "volume", "ml": "volume", "pack": "pack"}
+
+def convert_to_inventory_unit(qty, from_unit, inventory_unit):
+    """Convert qty from the form's unit to the INVENTORY row's unit via a
+    common base (grams/milliliters). Returns None when the units are
+    incompatible (e.g. 'pack' vs 'kg') — caller must block and warn instead
+    of computing blindly."""
+    fu = str(from_unit).strip().lower()
+    iu = str(inventory_unit).strip().lower()
+    if fu not in UNIT_TO_GRAMS_OR_ML or iu not in UNIT_TO_GRAMS_OR_ML:
+        return None
+    if _UNIT_GROUP[fu] != _UNIT_GROUP[iu]:
+        return None
+    return qty * UNIT_TO_GRAMS_OR_ML[fu] / UNIT_TO_GRAMS_OR_ML[iu]
+
+def find_inventory_item(inv_df, patterns):
+    """Find an INVENTORY row whose Item name contains any of the (lowercase)
+    patterns. Returns the row (Series) or None. Name-tolerant on purpose —
+    e.g. 'GYpsum' matches 'gypsum'."""
+    if inv_df.empty or "Item" not in inv_df.columns:
+        return None
+    for _, r in inv_df.iterrows():
+        name = str(r.get("Item", "")).lower()
+        if any(p in name for p in patterns):
+            return r
+    return None
+
+def is_brew_finished(brew_id, headers_df):
+    """Single source of truth for 'finished': FG_Date is set (i.e. the
+    'ეს არის FG' checkbox was used). Used by the edit-lock gate."""
+    match = headers_df[headers_df["Brew_ID"] == brew_id]
+    if match.empty:
+        return False
+    return str(match.iloc[0].get("FG_Date", "")).strip() not in ("", "nan", "None")
+
+def lock_gate(fg_date, key):
+    """Render the finished-brew warning + override checkbox for a tab.
+    Returns True when the tab should stay locked (inputs disabled)."""
+    st.warning(f"ეს ხარშვა დასრულებულია (FG დაფიქსირდა {fg_date}-ზე). "
+               f"ცვლილება არ არის რეკომენდებული.")
+    return not st.checkbox("მაინც მინდა რედაქტირება", key=key)
+
+def update_step_qty(bid, category, item, new_qty):
+    """Update the Qty of the BREW_STEPS row matching Brew_ID + Category + Item
+    (a 3-column match — update_cell_by_key can't do that, it keys on one
+    column). Returns True if a row was found and updated."""
+    w = ws("BREW_STEPS")
+    values = w.get_all_values()
+    if not values:
+        return False
+    headers = values[0]
+    try:
+        bi, ci, ii, qi = (headers.index("Brew_ID"), headers.index("Category"),
+                          headers.index("Item"), headers.index("Qty"))
+    except ValueError:
+        return False
+    for ridx, rowv in enumerate(values[1:], start=2):
+        if (len(rowv) > max(bi, ci, ii) and rowv[bi] == bid
+                and rowv[ci] == category and rowv[ii] == item):
+            w.update_cell(ridx, qi + 1, new_qty)
+            get_df.clear()
+            return True
+    return False
 
 def get_setting(key, default=None):
     """Read a value from the SETTINGS worksheet (Setting/Value columns)."""
@@ -162,7 +281,7 @@ def recalc_header_metrics(bid, og, fg, post_boil_vol, grain_kg, fg_confirmed=Fal
 # ============================================================
 # SIDEBAR NAV
 # ============================================================
-page = st.sidebar.radio("გვერდი", ["📦 Inventory", "🍺 ხარშვა"])
+page = st.sidebar.radio("გვერდი", ["📦 Inventory", "🍺 ხარშვა"], key="nav_radio")
 
 # ============================================================
 # PAGE 1 — INVENTORY
@@ -224,8 +343,17 @@ else:
     st.title("🍺 ხარშვის ჟურნალი")
 
     headers_df = get_df("BREW_HEADER")
-    ids = headers_df["Brew_ID"].tolist() if not headers_df.empty else []
-    choice = st.selectbox("აირჩიე ხარშვა ან შექმენი ახალი", ["➕ ახალი ხარშვა"] + ids)
+    # dropdown shows Display_Name, internally maps back to Brew_ID
+    label_to_bid = {}
+    if not headers_df.empty:
+        for _, hr in headers_df.iterrows():
+            dn = str(hr.get("Display_Name", "") or "").strip()
+            lab = dn if dn and dn.lower() != "nan" else str(hr["Brew_ID"])
+            if lab in label_to_bid:  # guard against duplicate names
+                lab = f"{lab} ({str(hr['Brew_ID'])[-4:]})"
+            label_to_bid[lab] = hr["Brew_ID"]
+    choice = st.selectbox("აირჩიე ხარშვა ან შექმენი ახალი",
+                          ["➕ ახალი ხარშვა"] + list(label_to_bid.keys()))
 
     # ---------- NEW BREW ----------
     if choice == "➕ ახალი ხარშვა":
@@ -244,52 +372,170 @@ else:
             start = st.form_submit_button("ხარშვის დაწყება")
             if start and style:
                 bid = new_id("BREW")
+                display_name = f"ხარშვა {len(headers_df) + 1} — {style}"
                 append_row("BREW_HEADER", {
                     "Brew_ID": bid, "Date": str(b_date), "Beer_Style": style,
                     "Fermenter": ferm, "Target_Vol_L": target_vol, "Water_uS": water_us,
                     "Target_OG_P": target_og, "Target_FG_P": target_fg,
+                    "Display_Name": display_name,
                 })
-                st.success(f"ხარშვა შეიქმნა: {bid}. აირჩიე ის ზემოთა სიიდან რომ დეტალები შეავსო.")
+                st.success(f"ხარშვა შეიქმნა: {display_name} ({bid}). "
+                           f"აირჩიე ის ზემოთა სიიდან რომ დეტალები შეავსო.")
                 st.rerun()
 
     # ---------- EXISTING BREW: TABS ----------
     else:
-        bid = choice
+        bid = label_to_bid[choice]
         row = headers_df[headers_df["Brew_ID"] == bid].iloc[0]
-        fg_done = str(row.get("Actual_FG_P", "")) not in ("", "nan", "None")
+        fg_done = is_brew_finished(bid, headers_df)
 
-        st.subheader(f"{bid} — {row.get('Beer_Style','')}")
+        st.subheader(choice)  # Display_Name already carries the style
+        st.caption(f"Brew_ID: {bid}")
         if fg_done:
             st.info("✅ FG მიღწეულია — ეს ხარშვა დახურულია. ცვლილება კვლავ შესაძლებელია, მაგრამ საჭირო აღარ არის.")
 
-        BREW_TABS = ["💧 წყალი", "🌾 მეშინგი", "🔥 დუღილი (boil/hop)", "🧪 ფერმენტაცია/Gravity"]
+        BREW_TABS = ["📊 მიმოხილვა", "💧 წყალი", "🌾 მეშინგი", "🔥 დუღილი (boil/hop)", "🧪 ფერმენტაცია/Gravity"]
         if "brew_tab" not in st.session_state:
-            st.session_state.brew_tab = "💧 წყალი"
-        # tab-like look for the horizontal radio; scoped via the widget key
-        # class (.st-key-*) so the sidebar radio is unaffected
-        st.markdown("""
-            <style>
-            .st-key-brew_tab_radio div[role="radiogroup"] label {
-                border: 1px solid rgba(128,128,128,.4); border-bottom: none;
-                border-radius: 8px 8px 0 0; padding: 4px 14px; margin-right: 4px;
-            }
-            .st-key-brew_tab_radio div[role="radiogroup"] label > div:first-child {
-                display: none;
-            }
-            </style>
-        """, unsafe_allow_html=True)
+            st.session_state.brew_tab = "📊 მიმოხილვა"
         st.session_state.brew_tab = st.radio(
             "ტაბი", BREW_TABS,
             horizontal=True, label_visibility="collapsed", key="brew_tab_radio",
             index=BREW_TABS.index(st.session_state.brew_tab)
         )
 
+        # ---- OVERVIEW TAB ----
+        if st.session_state.brew_tab == "📊 მიმოხილვა":
+            fg_confirmed = str(row.get("FG_Date", "")).strip() not in ("", "nan", "None")
+
+            def _show(v):
+                s = str(v).strip()
+                return s if s not in ("", "nan", "None") else "—"
+
+            # per-sheet reads once, filtered locally below
+            steps_all = get_df("BREW_STEPS")
+            steps_b = (steps_all[steps_all["Brew_ID"] == bid]
+                       if not steps_all.empty and "Brew_ID" in steps_all.columns
+                       else pd.DataFrame())
+            water_all = get_df("WATER_TREATMENT")
+            water_b = (water_all[water_all["Brew_ID"] == bid]
+                       if not water_all.empty and "Brew_ID" in water_all.columns
+                       else pd.DataFrame())
+            grav_all = get_df("BREW_GRAVITY_LOG")
+            grav_b = (grav_all[grav_all["Brew_ID"] == bid]
+                      if not grav_all.empty and "Brew_ID" in grav_all.columns
+                      else pd.DataFrame())
+
+            # --- header card ---
+            with st.container(border=True, key="ovcard-header"):
+                st.markdown(f"### 📊 {_show(row.get('Beer_Style'))}")
+                c1, c2, c3 = st.columns(3)
+                c1.markdown(f"**სტილი**  \n{_show(row.get('Beer_Style'))}")
+                c2.markdown(f"**თარიღი**  \n{_show(row.get('Date'))}")
+                c3.markdown(f"**ფერმენტორი**  \n{_show(row.get('Fermenter'))}")
+
+                c1, c2, c3, c4 = st.columns(4, gap="large")
+                c1.metric("Target OG (°P)", _show(row.get("Target_OG_P")))
+                c2.metric("Actual OG (°P)", _show(row.get("Actual_OG_P")))
+                c3.metric("Target FG (°P)", _show(row.get("Target_FG_P")))
+                c4.metric("Actual FG (°P)", _show(row.get("Actual_FG_P")))
+
+                if fg_confirmed:
+                    c1, c2, c3 = st.columns(3, gap="large")
+                    c1.metric("Brewhouse Eff %", _show(row.get("Brewhouse_Eff_%")))
+                    c2.metric("ADF %", _show(row.get("ADF_%")))
+                    c3.metric("Est ABV %", _show(row.get("Est_ABV_%")))
+                else:
+                    st.warning("⏳ მიმდინარეობს — FG დაუდასტურებელია. "
+                               "Brewhouse_Eff_%/ADF_%/Est_ABV_% ჯერ არ ითვლება.")
+
+            # --- water summary card ---
+            with st.container(border=True, key="ovcard-water"):
+                st.markdown("#### 💧 წყალი")
+                c1, c2, c3 = st.columns(3, gap="large")
+                c1.metric("Total Gypsum (g)", _show(row.get("Total_Gypsum_g")))
+                c2.metric("Total CaCl₂ (g)", _show(row.get("Total_CaCl2_g")))
+                c3.metric("Total Lactic (ml)", _show(row.get("Total_Lactic_ml")))
+                if not water_b.empty:
+                    wcols = [c for c in ["Water_Stream", "Volume_L", "Gypsum_g", "CaCl2_g",
+                                         "Lactic_ml", "Target_pH"] if c in water_b.columns]
+                    st.dataframe(water_b[wcols], width="stretch", hide_index=True)
+                else:
+                    st.caption("წყლის მონაცემი ჯერ არ არის შენახული.")
+
+            # --- grain bill card ---
+            with st.container(border=True, key="ovcard-grain"):
+                st.markdown("#### 🌾 ალაო (grain bill)")
+                malt_b = (steps_b[steps_b["Category"] == "Malt"]
+                          if not steps_b.empty and "Category" in steps_b.columns else pd.DataFrame())
+                if not malt_b.empty:
+                    mcols = [c for c in ["Item", "Qty", "Unit", "Justification"] if c in malt_b.columns]
+                    st.dataframe(malt_b[mcols], width="stretch", hide_index=True)
+                    total_grain = sum(_num(x) for x in malt_b["Qty"])
+                    st.metric("ჯამური Total_Grain_kg", f"{total_grain:g} kg")
+                else:
+                    st.caption("ალაო ჯერ არ არის დამატებული.")
+
+            # --- mash schedule card ---
+            with st.container(border=True, key="ovcard-mash"):
+                st.markdown("#### 🌾 Mash schedule")
+                mash_b = (steps_b[steps_b["Category"] == "Mash_Step"]
+                          if not steps_b.empty and "Category" in steps_b.columns else pd.DataFrame())
+                if not mash_b.empty:
+                    mscols = [c for c in ["Item", "Qty", "Unit", "Timing", "Justification"]
+                              if c in mash_b.columns]
+                    st.dataframe(mash_b[mscols], width="stretch", hide_index=True)
+                else:
+                    st.caption("Mash schedule ჯერ არ არის შევსებული.")
+
+            # --- hop schedule card (ordered 60წთ → 0 → Whirlpool) ---
+            with st.container(border=True, key="ovcard-hop"):
+                st.markdown("#### 🔥 Hop schedule")
+                hop_b = (steps_b[steps_b["Category"] == "Hop"]
+                         if not steps_b.empty and "Category" in steps_b.columns else pd.DataFrame())
+                if not hop_b.empty:
+                    hop_order = {"60წთ": 0, "30წთ": 1, "15წთ": 2, "5წთ": 3, "0": 4, "Whirlpool": 5}
+                    hop_b = hop_b.copy()
+                    hop_b["_o"] = hop_b["Timing"].map(lambda t: hop_order.get(str(t), 99))
+                    hop_b = hop_b.sort_values("_o")
+                    hcols = [c for c in ["Item", "Qty", "Unit", "Timing", "AA_%", "Justification"]
+                             if c in hop_b.columns]
+                    st.dataframe(hop_b[hcols], width="stretch", hide_index=True)
+                else:
+                    st.caption("ჰოპი ჯერ არ არის დამატებული.")
+
+            # --- gravity curve card ---
+            with st.container(border=True, key="ovcard-gravity"):
+                st.markdown("#### 🧪 Gravity curve")
+                if not grav_b.empty:
+                    gv = grav_b.copy()
+                    gv["Day_#"] = pd.to_numeric(gv.get("Day_#"), errors="coerce")
+                    gv["Gravity_P_Corrected"] = pd.to_numeric(gv.get("Gravity_P_Corrected"), errors="coerce")
+                    gv = gv.sort_values("Day_#")
+                    chart = gv.dropna(subset=["Day_#", "Gravity_P_Corrected"])
+                    if len(chart) >= 2:
+                        st.line_chart(chart.set_index("Day_#")[["Gravity_P_Corrected"]])
+                    elif len(chart) == 1:
+                        st.caption("მხოლოდ ერთი გაზომვაა — მრუდისთვის საჭიროა ≥2.")
+                    last_cols = [c for c in ["Day_#", "Date", "Gravity_P_Raw", "Gravity_P_Corrected",
+                                             "Temp_C"] if c in gv.columns]
+                    st.write("**ბოლო 3 გაზომვა:**")
+                    st.dataframe(gv[last_cols].tail(3), width="stretch", hide_index=True)
+                else:
+                    st.caption("Gravity log ჯერ ცარიელია.")
+
+            # --- outcome note card ---
+            if _show(row.get("Outcome_Note")) != "—":
+                with st.container(border=True, key="ovcard-outcome"):
+                    st.markdown("#### 📝 შედეგის შენიშვნა")
+                    st.write(_show(row.get("Outcome_Note")))
+
         # ---- WATER TAB ----
         if st.session_state.brew_tab == "💧 წყალი":
+            locked = lock_gate(row.get("FG_Date"), f"edit_ovr_water_{bid}") if fg_done else False
             profiles_df = get_df("WATER_PROFILES")
             profile_names = sorted(profiles_df["Profile_Name"].unique()) if not profiles_df.empty else []
             chosen_profile = st.selectbox("წყლის პროფილი (თუ შენახული გაქვს)",
-                                           ["— ხელით შევსება —"] + profile_names)
+                                           ["— ხელით შევსება —"] + profile_names, disabled=locked)
 
             defaults = {"Mash": {"vol": None, "gyp": 0, "cacl2": 0, "lac": 0, "ph": 5.3},
                         "Sparge": {"vol": 1000, "gyp": 0, "cacl2": 0, "lac": 0, "ph": 5.7}}
@@ -307,32 +553,73 @@ else:
 
             st.markdown("**Mash წყალი** _(მოცულობა ყოველ ხარშვაზე იცვლება — შეავსე ხელით)_")
             m1, m2, m3, m4, m5 = st.columns(5)
-            m_vol = m1.number_input("მოცულობა (L)", min_value=0.0, key="m_vol")
-            m_gyp = m2.number_input("Gypsum (g)", value=float(defaults["Mash"]["gyp"] or 0), key="m_gyp")
-            m_cacl = m3.number_input("CaCl2 (g)", value=float(defaults["Mash"]["cacl2"] or 0), key="m_cacl")
-            m_lac = m4.number_input("Lactic (ml)", value=float(defaults["Mash"]["lac"] or 0), key="m_lac")
-            m_ph = m5.number_input("Target pH", value=float(defaults["Mash"]["ph"] or 5.3), key="m_ph")
+            m_vol = m1.number_input("მოცულობა (L)", min_value=0.0, key="m_vol", disabled=locked)
+            m_gyp = m2.number_input("Gypsum (g)", value=float(defaults["Mash"]["gyp"] or 0), key="m_gyp", disabled=locked)
+            m_cacl = m3.number_input("CaCl2 (g)", value=float(defaults["Mash"]["cacl2"] or 0), key="m_cacl", disabled=locked)
+            m_lac = m4.number_input("Lactic (ml)", value=float(defaults["Mash"]["lac"] or 0), key="m_lac", disabled=locked)
+            m_ph = m5.number_input("Target pH", value=float(defaults["Mash"]["ph"] or 5.3), key="m_ph", disabled=locked)
 
             st.markdown("**Sparge წყალი**")
             s1, s2, s3, s4, s5 = st.columns(5)
-            s_vol = s1.number_input("მოცულობა (L)", value=float(defaults["Sparge"]["vol"] or 1000), key="s_vol")
-            s_gyp = s2.number_input("Gypsum (g)", value=float(defaults["Sparge"]["gyp"] or 0), key="s_gyp")
-            s_cacl = s3.number_input("CaCl2 (g)", value=float(defaults["Sparge"]["cacl2"] or 0), key="s_cacl")
-            s_lac = s4.number_input("Lactic (ml)", value=float(defaults["Sparge"]["lac"] or 0), key="s_lac")
-            s_ph = s5.number_input("Target pH", value=float(defaults["Sparge"]["ph"] or 5.7), key="s_ph")
+            s_vol = s1.number_input("მოცულობა (L)", value=float(defaults["Sparge"]["vol"] or 1000), key="s_vol", disabled=locked)
+            s_gyp = s2.number_input("Gypsum (g)", value=float(defaults["Sparge"]["gyp"] or 0), key="s_gyp", disabled=locked)
+            s_cacl = s3.number_input("CaCl2 (g)", value=float(defaults["Sparge"]["cacl2"] or 0), key="s_cacl", disabled=locked)
+            s_lac = s4.number_input("Lactic (ml)", value=float(defaults["Sparge"]["lac"] or 0), key="s_lac", disabled=locked)
+            s_ph = s5.number_input("Target pH", value=float(defaults["Sparge"]["ph"] or 5.7), key="s_ph", disabled=locked)
 
-            if st.button("💾 წყლის მონაცემის შენახვა"):
-                append_row("WATER_TREATMENT", {"Brew_ID": bid, "Water_Stream": "Mash",
-                    "Volume_L": m_vol, "Gypsum_g": m_gyp, "CaCl2_g": m_cacl,
-                    "Lactic_ml": m_lac, "Target_pH": m_ph})
-                append_row("WATER_TREATMENT", {"Brew_ID": bid, "Water_Stream": "Sparge",
-                    "Volume_L": s_vol, "Gypsum_g": s_gyp, "CaCl2_g": s_cacl,
-                    "Lactic_ml": s_lac, "Target_pH": s_ph})
-                st.success("წყლის მონაცემი შენახულია.")
+            if st.button("💾 წყლის მონაცემის შენახვა", disabled=locked):
+                # salt auto-deduction: total need across Mash+Sparge, in grams.
+                # Only NEW saves deduct — existing WATER_TREATMENT rows are
+                # never touched retroactively.
+                need = {"Gypsum": m_gyp + s_gyp, "CaCl2": m_cacl + s_cacl}
+                inv_w_df = get_df("INVENTORY")
+                salt_rows = {
+                    "Gypsum": find_inventory_item(inv_w_df, ["gypsum", "caso4"]),
+                    "CaCl2": find_inventory_item(inv_w_df, ["cacl", "calcium chloride"]),
+                }
+                blocked = False
+                deductions = {}  # salt -> (item_name, stock, deduct_in_inv_unit, inv_unit)
+                for salt, needed_g in need.items():
+                    if needed_g <= 0:
+                        continue
+                    r = salt_rows[salt]
+                    if r is None:
+                        st.warning(f"INVENTORY-ში ვერ მოიძებნა {salt} (Salt) — "
+                                   f"ამ მარილზე ჩამოჭრა გამოტოვებულია.")
+                        continue
+                    inv_unit = str(r.get("Unit", "") or "").strip()
+                    stock = _num(r.get("Current_Qty", 0))
+                    deduct = convert_to_inventory_unit(needed_g, "g", inv_unit)
+                    if deduct is None:
+                        st.error(f"{r['Item']}: ერთეულები შეუთავსებელია (g ↔ "
+                                 f"'{inv_unit}') — გაასწორე INVENTORY-ში. შენახვა დაიბლოკა.")
+                        blocked = True
+                    elif deduct > stock:
+                        st.error(f"{r['Item']} მარაგშია მხოლოდ {stock:g}{inv_unit}, "
+                                 f"საჭიროა {deduct:g}{inv_unit}.")
+                        blocked = True
+                    else:
+                        deductions[salt] = (r["Item"], stock, deduct, inv_unit)
+                if not blocked:
+                    append_row("WATER_TREATMENT", {"Brew_ID": bid, "Water_Stream": "Mash",
+                        "Volume_L": m_vol, "Gypsum_g": m_gyp, "CaCl2_g": m_cacl,
+                        "Lactic_ml": m_lac, "Target_pH": m_ph})
+                    append_row("WATER_TREATMENT", {"Brew_ID": bid, "Water_Stream": "Sparge",
+                        "Volume_L": s_vol, "Gypsum_g": s_gyp, "CaCl2_g": s_cacl,
+                        "Lactic_ml": s_lac, "Target_pH": s_ph})
+                    for salt, (item, stock, deduct, inv_unit) in deductions.items():
+                        update_cell_by_key("INVENTORY", "Item", item,
+                                           "Current_Qty", round(stock - deduct, 4))
+                    msg = "წყლის მონაცემი შენახულია."
+                    if deductions:
+                        parts = ", ".join(f"{salt} {d:g}{u}"
+                                          for salt, (_, _, d, u) in deductions.items())
+                        msg += f" მარაგიდან ჩამოეჭრა: {parts}."
+                    st.success(msg)
 
             st.caption("იმ პროფილს ხედავ პირველად? — შეინახე ახლანდელი მნიშვნელობები, რომ მომდევნო ჯერზე აღარ გჭირდეს ხელით.")
-            new_profile_name = st.text_input("შეინახე ეს, როგორც ახალი პროფილი (სახელი)")
-            if st.button("💾 პროფილად შენახვა") and new_profile_name:
+            new_profile_name = st.text_input("შეინახე ეს, როგორც ახალი პროფილი (სახელი)", disabled=locked)
+            if st.button("💾 პროფილად შენახვა", disabled=locked) and new_profile_name:
                 append_row("WATER_PROFILES", {"Profile_Name": new_profile_name, "Stream": "Mash",
                     "Volume_L_Default": m_vol, "Gypsum_g": m_gyp, "CaCl2_g": m_cacl,
                     "Lactic_ml": m_lac, "Target_pH": m_ph})
@@ -349,6 +636,7 @@ else:
 
         # ---- MASH TAB ----
         if st.session_state.brew_tab == "🌾 მეშინგი":
+            locked = lock_gate(row.get("FG_Date"), f"edit_ovr_mash_{bid}") if fg_done else False
             st.caption("[Certain] mash schedule ხარშვიდან ხარშვამდე იცვლება — ამიტომ ყოველთვის ხელით.")
             st.markdown("**საფეხურები** _(შეავსე ის row-ები, რომლებიც გჭირდება — ცარიელი row-ები არ ჩაიწერება)_")
             mash_template = pd.DataFrame({
@@ -359,49 +647,118 @@ else:
             })
             mash_edit = st.data_editor(
                 mash_template, num_rows="fixed", use_container_width=True,
-                key="mash_steps_editor",
+                key="mash_steps_editor", disabled=locked,
             )
-            if st.button("💾 საფეხურების შენახვა"):
-                saved = 0
+            if st.button("💾 საფეხურების შენახვა", disabled=locked):
+                # Phase D.2: block duplicate temperatures — both against steps
+                # already in BREW_STEPS and within the 5-row batch itself.
+                existing_mash = get_df("BREW_STEPS")
+                existing_temps = {}  # temp(°C) -> step Item name already saved
+                if (not existing_mash.empty
+                        and {"Brew_ID", "Category", "Qty", "Item"} <= set(existing_mash.columns)):
+                    em = existing_mash[(existing_mash["Brew_ID"] == bid)
+                                       & (existing_mash["Category"] == "Mash_Step")]
+                    for _, er in em.iterrows():
+                        existing_temps[_num(er.get("Qty"))] = str(er.get("Item", ""))
+
+                to_save, batch_temps, dup_err = [], {}, None
                 for _, r in mash_edit.iterrows():
                     temp_v = r["ტემპ (°C)"]
                     dur_v = r["ხანგრძლივობა (წთ)"]
                     if (temp_v in (None, "", 0, 0.0)) and (dur_v in (None, "", 0)):
                         continue  # ცარიელი row — იგნორი
-                    append_row("BREW_STEPS", {
-                        "Brew_ID": bid, "Stage": "Mash", "Category": "Mash_Step",
-                        "Item": f"საფეხური {int(r['საფეხური #'])}",
-                        "Qty": temp_v, "Unit": "°C",
-                        "Timing": f"{int(dur_v)} წთ", "Justification": r["შენიშვნა"],
-                    })
-                    saved += 1
-                st.success(f"{saved} საფეხური შენახულია." if saved else "შესავსები row ვერ მოიძებნა.")
-                if saved:
+                    t = _num(temp_v)
+                    step_no = int(r["საფეხური #"])
+                    if t in existing_temps:
+                        dup_err = (f"ეს ტემპერატურა ({t:g}°C) უკვე დამატებულია "
+                                   f"საფეხურ „{existing_temps[t]}“-ში.")
+                        break
+                    if t in batch_temps:
+                        dup_err = (f"ეს ტემპერატურა ({t:g}°C) გამეორებულია — "
+                                   f"საფეხური {batch_temps[t]} და {step_no}.")
+                        break
+                    batch_temps[t] = step_no
+                    to_save.append((step_no, temp_v, dur_v, r["შენიშვნა"]))
+
+                if dup_err:
+                    st.error(dup_err)
+                elif not to_save:
+                    st.success("შესავსები row ვერ მოიძებნა.")
+                else:
+                    for step_no, temp_v, dur_v, note in to_save:
+                        append_row("BREW_STEPS", {
+                            "Brew_ID": bid, "Stage": "Mash", "Category": "Mash_Step",
+                            "Item": f"საფეხური {step_no}",
+                            "Qty": temp_v, "Unit": "°C",
+                            "Timing": f"{int(dur_v)} წთ", "Justification": note,
+                        })
+                    st.success(f"{len(to_save)} საფეხური შენახულია.")
                     st.rerun()
 
             st.markdown("**ალაოს ჩამონათვალი (grain bill)**")
-            st.caption("[Certain] ვალიდაცია მხოლოდ — მარაგზე მეტს ვერ აირჩევ. "
-                       "INVENTORY-დან ავტომატური ჩამოჭრა განზრახ არ ხდება.")
+            st.caption("[Certain] დამატებისას რაოდენობა ავტომატურად ჩამოეჭრება "
+                       "INVENTORY-ს (ერთეულის კონვერტაციით). მარაგზე მეტს ვერ აირჩევ.")
             inv_df = get_df("INVENTORY")
             malt_opts = (sorted(inv_df[inv_df["Category"] == "Malt"]["Item"].tolist())
                          if not inv_df.empty and "Category" in inv_df.columns else [])
             if not malt_opts:
                 st.info("INVENTORY-ში Malt კატეგორიის ჩანაწერი არ არის — ჯერ დაამატე მარაგში.")
             else:
-                malt_name = st.selectbox("ალაო", malt_opts, key="malt_sel")
-                malt_max = _num(inv_df[inv_df["Item"] == malt_name].iloc[0].get("Current_Qty", 0))
+                malt_name = st.selectbox("ალაო", malt_opts, key="malt_sel", disabled=locked)
+                malt_inv = inv_df[inv_df["Item"] == malt_name].iloc[0]
+                malt_stock = _num(malt_inv.get("Current_Qty", 0))
+                malt_inv_unit = str(malt_inv.get("Unit", "") or "").strip()
+                # stock converted into the form's unit (kg) → live cap
+                malt_cap = convert_to_inventory_unit(malt_stock, malt_inv_unit, "kg")
+                if malt_cap is None:
+                    st.error(f"ერთეულები შეუთავსებელია: ფორმაში kg, მარაგში "
+                             f"'{malt_inv_unit}' — ჩამოჭრა ვერ გამოითვლება. "
+                             f"გაასწორე ამ item-ის ერთეული INVENTORY-ში.")
                 c1, c2 = st.columns(2)
                 malt_qty = c1.number_input(
-                    f"რაოდენობა (kg) — მარაგში {malt_max:g}", min_value=0.0,
-                    max_value=malt_max if malt_max > 0 else None, key="malt_qty")
-                malt_just = c2.text_input("დასაბუთება", key="malt_just")
-                if st.button("დამატება (ალაო)") and malt_qty > 0:
-                    append_row("BREW_STEPS", {
-                        "Brew_ID": bid, "Stage": "Mash", "Category": "Malt",
-                        "Item": malt_name, "Qty": malt_qty, "Unit": "kg",
-                        "Justification": malt_just,
-                    })
-                    st.rerun()
+                    f"რაოდენობა (kg) — მარაგში {malt_cap:g} kg" if malt_cap is not None
+                    else "რაოდენობა (kg)",
+                    min_value=0.0,
+                    max_value=malt_cap if (malt_cap and malt_cap > 0) else None,
+                    key="malt_qty", disabled=locked)
+                malt_just = c2.text_input("დასაბუთება", key="malt_just", disabled=locked)
+                malt_deduct = convert_to_inventory_unit(malt_qty, "kg", malt_inv_unit)
+                # Phase E: same Brew_ID+Category+Item already added?
+                malt_steps = get_df("BREW_STEPS")
+                malt_existing = (malt_steps[(malt_steps["Brew_ID"] == bid)
+                                            & (malt_steps["Category"] == "Malt")
+                                            & (malt_steps["Item"] == malt_name)]
+                                 if not malt_steps.empty
+                                 and {"Brew_ID", "Category", "Item"} <= set(malt_steps.columns)
+                                 else pd.DataFrame())
+                if malt_deduct:
+                    if not malt_existing.empty:
+                        prev = _num(malt_existing.iloc[0].get("Qty"))
+                        st.caption(f"უკვე დამატებულია {prev:g} kg — დაემატება ჯამში "
+                                   f"{prev + malt_qty:g} kg. მარაგიდან ჩამოეჭრება: "
+                                   f"{malt_deduct:g} {malt_inv_unit}")
+                    else:
+                        st.caption(f"მარაგიდან ჩამოეჭრება: {malt_deduct:g} {malt_inv_unit}")
+                if st.button("დამატება (ალაო)", disabled=locked) and malt_qty > 0:
+                    if malt_deduct is None:
+                        st.error("ერთეულები შეუთავსებელია — ჩანაწერი არ შენახულა, "
+                                 "ჩამოჭრა არ მომხდარა.")
+                    elif malt_deduct > malt_stock:
+                        st.error(f"მარაგშია მხოლოდ {malt_stock:g} {malt_inv_unit}, "
+                                 f"მოთხოვნილია {malt_deduct:g} {malt_inv_unit}.")
+                    else:
+                        if not malt_existing.empty:
+                            new_total = round(_num(malt_existing.iloc[0].get("Qty")) + malt_qty, 4)
+                            update_step_qty(bid, "Malt", malt_name, new_total)
+                        else:
+                            append_row("BREW_STEPS", {
+                                "Brew_ID": bid, "Stage": "Mash", "Category": "Malt",
+                                "Item": malt_name, "Qty": malt_qty, "Unit": "kg",
+                                "Justification": malt_just,
+                            })
+                        update_cell_by_key("INVENTORY", "Item", malt_name,
+                                           "Current_Qty", round(malt_stock - malt_deduct, 4))
+                        st.rerun()
 
             steps_df = get_df("BREW_STEPS")
             if not steps_df.empty:
@@ -410,41 +767,82 @@ else:
 
         # ---- BOIL / HOP TAB ----
         if st.session_state.brew_tab == "🔥 დუღილი (boil/hop)":
+            locked = lock_gate(row.get("FG_Date"), f"edit_ovr_boil_{bid}") if fg_done else False
             st.markdown("**ჰოპის დამატება**")
-            st.caption("[Certain] ვალიდაცია მხოლოდ — მარაგზე მეტს ვერ აირჩევ. "
-                       "AA% ავტომატურად ივსება INVENTORY-დან. ჩამოჭრა არ ხდება.")
+            st.caption("[Certain] დამატებისას რაოდენობა ავტომატურად ჩამოეჭრება "
+                       "INVENTORY-ს (ერთეულის კონვერტაციით). AA% ივსება INVENTORY-დან.")
             inv_hop_df = get_df("INVENTORY")
             hop_opts = (sorted(inv_hop_df[inv_hop_df["Category"] == "Hop"]["Item"].tolist())
                         if not inv_hop_df.empty and "Category" in inv_hop_df.columns else [])
             if not hop_opts:
                 st.info("INVENTORY-ში Hop კატეგორიის ჩანაწერი არ არის — ჯერ დაამატე მარაგში.")
             else:
-                hop_name = st.selectbox("ჰოპი", hop_opts, key="hop_sel")
+                hop_name = st.selectbox("ჰოპი", hop_opts, key="hop_sel", disabled=locked)
                 hop_inv_row = inv_hop_df[inv_hop_df["Item"] == hop_name].iloc[0]
-                hop_max = _num(hop_inv_row.get("Current_Qty", 0))
+                hop_stock = _num(hop_inv_row.get("Current_Qty", 0))
+                hop_inv_unit = str(hop_inv_row.get("Unit", "") or "").strip()
                 hop_aa = str(hop_inv_row.get("AA_%_if_hop", "") or "")
+                # stock converted into the form's unit (g) → live cap
+                hop_cap = convert_to_inventory_unit(hop_stock, hop_inv_unit, "g")
+                if hop_cap is None:
+                    st.error(f"ერთეულები შეუთავსებელია: ფორმაში g, მარაგში "
+                             f"'{hop_inv_unit}' — ჩამოჭრა ვერ გამოითვლება. "
+                             f"გაასწორე ამ item-ის ერთეული INVENTORY-ში.")
                 c1, c2, c3 = st.columns(3)
                 hop_qty = c1.number_input(
-                    f"რაოდენობა (g) — მარაგში {hop_max:g}", min_value=0.0,
-                    max_value=hop_max if hop_max > 0 else None, key="hop_qty")
-                hop_timing = c2.selectbox("დრო", ["60წთ", "30წთ", "15წთ", "5წთ", "0", "Whirlpool"], key="hop_timing")
+                    f"რაოდენობა (g) — მარაგში {hop_cap:g} g" if hop_cap is not None
+                    else "რაოდენობა (g)",
+                    min_value=0.0,
+                    max_value=hop_cap if (hop_cap and hop_cap > 0) else None,
+                    key="hop_qty", disabled=locked)
+                hop_timing = c2.selectbox("დრო", ["60წთ", "30წთ", "15წთ", "5წთ", "0", "Whirlpool"], key="hop_timing", disabled=locked)
                 c3.text_input("AA% (INVENTORY-დან)", value=hop_aa, disabled=True, key="hop_aa_display")
-                hop_just = st.text_input("დასაბუთება", key="hop_just")
-                if st.button("დამატება (ჰოპი)") and hop_qty > 0:
-                    append_row("BREW_STEPS", {
-                        "Brew_ID": bid, "Stage": "Boil", "Category": "Hop",
-                        "Item": hop_name, "Qty": hop_qty, "Unit": "g",
-                        "Timing": hop_timing, "AA_%": hop_aa, "Justification": hop_just,
-                    })
-                    st.rerun()
+                hop_just = st.text_input("დასაბუთება", key="hop_just", disabled=locked)
+                hop_deduct = convert_to_inventory_unit(hop_qty, "g", hop_inv_unit)
+                # Phase E: same Brew_ID+Category+Item already added?
+                hop_steps = get_df("BREW_STEPS")
+                hop_existing = (hop_steps[(hop_steps["Brew_ID"] == bid)
+                                          & (hop_steps["Category"] == "Hop")
+                                          & (hop_steps["Item"] == hop_name)]
+                                if not hop_steps.empty
+                                and {"Brew_ID", "Category", "Item"} <= set(hop_steps.columns)
+                                else pd.DataFrame())
+                if hop_deduct:
+                    if not hop_existing.empty:
+                        prev = _num(hop_existing.iloc[0].get("Qty"))
+                        st.caption(f"უკვე დამატებულია {prev:g} g — დაემატება ჯამში "
+                                   f"{prev + hop_qty:g} g. მარაგიდან ჩამოეჭრება: "
+                                   f"{hop_deduct:g} {hop_inv_unit}")
+                    else:
+                        st.caption(f"მარაგიდან ჩამოეჭრება: {hop_deduct:g} {hop_inv_unit}")
+                if st.button("დამატება (ჰოპი)", disabled=locked) and hop_qty > 0:
+                    if hop_deduct is None:
+                        st.error("ერთეულები შეუთავსებელია — ჩანაწერი არ შენახულა, "
+                                 "ჩამოჭრა არ მომხდარა.")
+                    elif hop_deduct > hop_stock:
+                        st.error(f"მარაგშია მხოლოდ {hop_stock:g} {hop_inv_unit}, "
+                                 f"მოთხოვნილია {hop_deduct:g} {hop_inv_unit}.")
+                    else:
+                        if not hop_existing.empty:
+                            new_total = round(_num(hop_existing.iloc[0].get("Qty")) + hop_qty, 4)
+                            update_step_qty(bid, "Hop", hop_name, new_total)
+                        else:
+                            append_row("BREW_STEPS", {
+                                "Brew_ID": bid, "Stage": "Boil", "Category": "Hop",
+                                "Item": hop_name, "Qty": hop_qty, "Unit": "g",
+                                "Timing": hop_timing, "AA_%": hop_aa, "Justification": hop_just,
+                            })
+                        update_cell_by_key("INVENTORY", "Item", hop_name,
+                                           "Current_Qty", round(hop_stock - hop_deduct, 4))
+                        st.rerun()
 
             c1, c2 = st.columns(2)
-            pre_boil_vol = c1.number_input("Pre-Boil მოცულობა (L)")
-            pre_boil_p = c2.number_input("Pre-Boil Gravity (°P)")
+            pre_boil_vol = c1.number_input("Pre-Boil მოცულობა (L)", disabled=locked)
+            pre_boil_p = c2.number_input("Pre-Boil Gravity (°P)", disabled=locked)
             c3, c4 = st.columns(2)
-            post_boil_vol = c3.number_input("Post-Boil მოცულობა (L)")
-            actual_og = c4.number_input("Actual OG (°P)")
-            if st.button("💾 boil მონაცემის შენახვა header-ში"):
+            post_boil_vol = c3.number_input("Post-Boil მოცულობა (L)", disabled=locked)
+            actual_og = c4.number_input("Actual OG (°P)", disabled=locked)
+            if st.button("💾 boil მონაცემის შენახვა header-ში", disabled=locked):
                 for col, val in [("Pre_Boil_Vol_L", pre_boil_vol), ("Pre_Boil_P", pre_boil_p),
                                   ("Post_Boil_Vol_L", post_boil_vol), ("Actual_OG_P", actual_og)]:
                     update_cell_by_key("BREW_HEADER", "Brew_ID", bid, col, val)
@@ -466,15 +864,16 @@ else:
 
         # ---- FERMENT / GRAVITY TAB ----
         if st.session_state.brew_tab == "🧪 ფერმენტაცია/Gravity":
+            locked = lock_gate(row.get("FG_Date"), f"edit_ovr_ferm_{bid}") if fg_done else False
             st.markdown("**ყოველდღიური Gravity-ის ჩაწერა**")
             with st.form("gravity_add", clear_on_submit=True):
                 c1, c2, c3, c4 = st.columns(4)
-                g_date = c1.date_input("თარიღი", value=date.today())
-                g_day = c2.number_input("დღე #", min_value=0, step=1)
-                g_raw = c3.number_input("Gravity (°P) — ჰიდრომეტრიდან, დაუკორექტირებელი")
-                g_temp = c4.number_input("ტემპერატურა (°C)", value=20.0)
-                is_final = st.checkbox("ეს არის საბოლოო (FG) გაზომვა")
-                add_g = st.form_submit_button("დამატება")
+                g_date = c1.date_input("თარიღი", value=date.today(), disabled=locked)
+                g_day = c2.number_input("დღე #", min_value=0, step=1, disabled=locked)
+                g_raw = c3.number_input("Gravity (°P) — ჰიდრომეტრიდან, დაუკორექტირებელი", disabled=locked)
+                g_temp = c4.number_input("ტემპერატურა (°C)", value=20.0, disabled=locked)
+                is_final = st.checkbox("ეს არის საბოლოო (FG) გაზომვა", disabled=locked)
+                add_g = st.form_submit_button("დამატება", disabled=locked)
                 if add_g:
                     ref_temp = _num(get_setting("Hydrometer_Ref_Temp_C", 20), 20)
                     corrected = correct_gravity_plato(g_raw, g_temp, ref_temp)
@@ -508,7 +907,7 @@ else:
                     st.line_chart(chart_df)
 
             outcome = st.text_area("შედეგის შენიშვნა (გემო/სუნი/სიმღვრივე kegging-ისას)",
-                                    value=str(row.get("Outcome_Note", "")))
-            if st.button("💾 შედეგის შენახვა"):
+                                    value=str(row.get("Outcome_Note", "")), disabled=locked)
+            if st.button("💾 შედეგის შენახვა", disabled=locked):
                 update_cell_by_key("BREW_HEADER", "Brew_ID", bid, "Outcome_Note", outcome)
                 st.success("შენახულია.")
