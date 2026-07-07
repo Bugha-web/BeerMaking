@@ -56,6 +56,60 @@ st.markdown("""
     background: rgba(224, 162, 60, 0.15);
     box-shadow: inset 3px 0 0 #E0A23C;
 }
+
+/* ---------- mobile / touch ---------- */
+/* touch-friendly targets everywhere (Apple HIG minimum 44px) */
+.stButton button, .stFormSubmitButton button, .stDownloadButton button {
+    min-height: 44px;
+}
+[data-testid="stNumberInput"] input,
+[data-testid="stTextInput"] input,
+[data-testid="stDateInput"] input,
+[data-baseweb="select"] > div {
+    min-height: 44px;
+}
+[data-testid="stNumberInput"] button { min-width: 40px; }  /* +/- steppers */
+/* widget labels: wrap instead of truncate on narrow screens */
+[data-testid="stWidgetLabel"] p {
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+/* sidebar toggle (hamburger when collapsed): bigger, amber, obvious.
+   stExpandSidebarButton = 1.59 testid; stSidebarCollapsedControl = older */
+button[data-testid="stExpandSidebarButton"],
+[data-testid="stSidebarCollapsedControl"] {
+    background: rgba(224, 162, 60, 0.15) !important;
+    border: 1px solid rgba(224, 162, 60, 0.5) !important;
+    border-radius: 10px;
+    min-height: 44px;
+    min-width: 44px;
+}
+button[data-testid="stExpandSidebarButton"] *,
+[data-testid="stSidebarCollapsedControl"] * { color: #E0A23C !important; }
+
+@media (max-width: 640px) {
+    /* primary action buttons stretch to full width on phones.
+       the wrapper divs are fit-content, so widen the whole chain */
+    [data-testid="stElementContainer"]:has([data-testid="stButton"]),
+    [data-testid="stElementContainer"]:has([data-testid="stFormSubmitButton"]) { width: 100%; }
+    .stButton, .stFormSubmitButton { width: 100%; }
+    .stButton button, .stFormSubmitButton button { width: 100%; }
+    /* brew tab bar: single row, horizontally swipeable */
+    .st-key-brew_tab_radio div[role="radiogroup"] {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        padding-bottom: 2px;
+    }
+    .st-key-brew_tab_radio div[role="radiogroup"]::-webkit-scrollbar { display: none; }
+    .st-key-brew_tab_radio div[role="radiogroup"] label {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+    /* slightly tighter page padding on phones */
+    [data-testid="stMainBlockContainer"] { padding-left: 1rem; padding-right: 1rem; }
+}
 </style>
 """, unsafe_allow_html=True)
 
