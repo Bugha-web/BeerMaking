@@ -253,10 +253,12 @@ def lock_gate(fg_date, key):
                f"ცვლილება არ არის რეკომენდებული.")
     return not st.checkbox("მაინც მინდა რედაქტირება", key=key)
 
-def update_step_qty(bid, category, item, new_qty):
+def update_step_qty(bid, category, item, new_qty, timing=None):
     """Update the Qty of the BREW_STEPS row matching Brew_ID + Category + Item
-    (a 3-column match — update_cell_by_key can't do that, it keys on one
-    column). Returns True if a row was found and updated."""
+    (a multi-column match — update_cell_by_key can't do that, it keys on one
+    column). When timing is given (hops), the Timing column must match too:
+    the same hop at a different timing is a separate addition, not a
+    duplicate. Returns True if a row was found and updated."""
     w = ws("BREW_STEPS")
     values = w.get_all_values()
     if not values:
@@ -265,11 +267,13 @@ def update_step_qty(bid, category, item, new_qty):
     try:
         bi, ci, ii, qi = (headers.index("Brew_ID"), headers.index("Category"),
                           headers.index("Item"), headers.index("Qty"))
+        ti = headers.index("Timing") if timing is not None else None
     except ValueError:
         return False
     for ridx, rowv in enumerate(values[1:], start=2):
         if (len(rowv) > max(bi, ci, ii) and rowv[bi] == bid
-                and rowv[ci] == category and rowv[ii] == item):
+                and rowv[ci] == category and rowv[ii] == item
+                and (ti is None or (len(rowv) > ti and rowv[ti] == str(timing)))):
             w.update_cell(ridx, qi + 1, new_qty)
             get_df.clear()
             return True
@@ -927,22 +931,25 @@ else:
                 c3.text_input("AA% (INVENTORY-დან)", value=hop_aa, disabled=True, key="hop_aa_display")
                 hop_just = st.text_input("დასაბუთება", key="hop_just", disabled=locked)
                 hop_deduct = convert_to_inventory_unit(hop_qty, "g", hop_inv_unit)
-                # Phase E: same Brew_ID+Category+Item already added?
+                # Phase E: true duplicate for hops = same Brew_ID+Category+Item
+                # AND Timing. Same hop at another timing is a separate addition
+                # (e.g. Tradition@30წთ vs Tradition@0წთ must stay two rows).
                 hop_steps = get_df("BREW_STEPS")
                 hop_existing = (hop_steps[(hop_steps["Brew_ID"] == bid)
                                           & (hop_steps["Category"] == "Hop")
-                                          & (hop_steps["Item"] == hop_name)]
+                                          & (hop_steps["Item"] == hop_name)
+                                          & (hop_steps["Timing"].astype(str) == str(hop_timing))]
                                 if not hop_steps.empty
-                                and {"Brew_ID", "Category", "Item"} <= set(hop_steps.columns)
+                                and {"Brew_ID", "Category", "Item", "Timing"} <= set(hop_steps.columns)
                                 else pd.DataFrame())
                 if hist_mode:
                     st.caption("📜 ისტორიული რეჟიმი — მარაგიდან არ ჩამოეჭრება.")
                 elif hop_deduct:
                     if not hop_existing.empty:
                         prev = _num(hop_existing.iloc[0].get("Qty"))
-                        st.caption(f"უკვე დამატებულია {prev:g} g — დაემატება ჯამში "
-                                   f"{prev + hop_qty:g} g. მარაგიდან ჩამოეჭრება: "
-                                   f"{hop_deduct:g} {hop_inv_unit}")
+                        st.caption(f"უკვე დამატებულია {prev:g} g ({hop_timing}) — "
+                                   f"დაემატება ჯამში {prev + hop_qty:g} g. "
+                                   f"მარაგიდან ჩამოეჭრება: {hop_deduct:g} {hop_inv_unit}")
                     else:
                         st.caption(f"მარაგიდან ჩამოეჭრება: {hop_deduct:g} {hop_inv_unit}")
                 if st.button("დამატება (ჰოპი)", disabled=locked) and hop_qty > 0:
@@ -955,7 +962,8 @@ else:
                     else:
                         if not hop_existing.empty:
                             new_total = round(_num(hop_existing.iloc[0].get("Qty")) + hop_qty, 4)
-                            update_step_qty(bid, "Hop", hop_name, new_total)
+                            update_step_qty(bid, "Hop", hop_name, new_total,
+                                            timing=hop_timing)
                         else:
                             append_row("BREW_STEPS", {
                                 "Brew_ID": bid, "Stage": "Boil", "Category": "Hop",
