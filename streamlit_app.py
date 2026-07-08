@@ -357,6 +357,18 @@ def recalc_header_metrics(bid, og, fg, post_boil_vol, grain_kg, fg_confirmed=Fal
 # ============================================================
 page = st.sidebar.radio("გვერდი", ["📦 Inventory", "🍺 ხარშვა"], key="nav_radio")
 
+# ---- historical entry mode: record old brews without touching stock ----
+st.session_state.setdefault("historical_mode", False)
+st.session_state.historical_mode = st.sidebar.checkbox(
+    "📜 ისტორიული ხარშვის შეყვანა (მარაგს არ ჩამოაკლებს)",
+    value=st.session_state.historical_mode, key="historical_mode_cb"
+)
+if st.session_state.historical_mode:
+    st.sidebar.warning("ისტორიული რეჟიმი ჩართულია — ხარშვა ჩაიწერება, "
+                       "მაგრამ მარაგს არ ჩამოაკლდება. გამორთე, როცა ძველი "
+                       "ხარშვების შეყვანას დაასრულებ.")
+hist_mode = st.session_state.historical_mode
+
 # ============================================================
 # PAGE 1 — INVENTORY
 # ============================================================
@@ -680,34 +692,35 @@ else:
                 # Only NEW saves deduct — existing WATER_TREATMENT rows are
                 # never touched retroactively.
                 need = {"Gypsum": m_gyp + s_gyp, "CaCl2": m_cacl + s_cacl}
-                inv_w_df = get_df("INVENTORY")
-                salt_rows = {
-                    "Gypsum": find_inventory_item(inv_w_df, ["gypsum", "caso4"]),
-                    "CaCl2": find_inventory_item(inv_w_df, ["cacl", "calcium chloride"]),
-                }
                 blocked = False
                 deductions = {}  # salt -> (item_name, stock, deduct_in_inv_unit, inv_unit)
-                for salt, needed_g in need.items():
-                    if needed_g <= 0:
-                        continue
-                    r = salt_rows[salt]
-                    if r is None:
-                        st.warning(f"INVENTORY-ში ვერ მოიძებნა {salt} (Salt) — "
-                                   f"ამ მარილზე ჩამოჭრა გამოტოვებულია.")
-                        continue
-                    inv_unit = str(r.get("Unit", "") or "").strip()
-                    stock = _num(r.get("Current_Qty", 0))
-                    deduct = convert_to_inventory_unit(needed_g, "g", inv_unit)
-                    if deduct is None:
-                        st.error(f"{r['Item']}: ერთეულები შეუთავსებელია (g ↔ "
-                                 f"'{inv_unit}') — გაასწორე INVENTORY-ში. შენახვა დაიბლოკა.")
-                        blocked = True
-                    elif deduct > stock:
-                        st.error(f"{r['Item']} მარაგშია მხოლოდ {stock:g}{inv_unit}, "
-                                 f"საჭიროა {deduct:g}{inv_unit}.")
-                        blocked = True
-                    else:
-                        deductions[salt] = (r["Item"], stock, deduct, inv_unit)
+                if not hist_mode:  # historical entries never validate/deduct stock
+                    inv_w_df = get_df("INVENTORY")
+                    salt_rows = {
+                        "Gypsum": find_inventory_item(inv_w_df, ["gypsum", "caso4"]),
+                        "CaCl2": find_inventory_item(inv_w_df, ["cacl", "calcium chloride"]),
+                    }
+                    for salt, needed_g in need.items():
+                        if needed_g <= 0:
+                            continue
+                        r = salt_rows[salt]
+                        if r is None:
+                            st.warning(f"INVENTORY-ში ვერ მოიძებნა {salt} (Salt) — "
+                                       f"ამ მარილზე ჩამოჭრა გამოტოვებულია.")
+                            continue
+                        inv_unit = str(r.get("Unit", "") or "").strip()
+                        stock = _num(r.get("Current_Qty", 0))
+                        deduct = convert_to_inventory_unit(needed_g, "g", inv_unit)
+                        if deduct is None:
+                            st.error(f"{r['Item']}: ერთეულები შეუთავსებელია (g ↔ "
+                                     f"'{inv_unit}') — გაასწორე INVENTORY-ში. შენახვა დაიბლოკა.")
+                            blocked = True
+                        elif deduct > stock:
+                            st.error(f"{r['Item']} მარაგშია მხოლოდ {stock:g}{inv_unit}, "
+                                     f"საჭიროა {deduct:g}{inv_unit}.")
+                            blocked = True
+                        else:
+                            deductions[salt] = (r["Item"], stock, deduct, inv_unit)
                 if not blocked:
                     append_row("WATER_TREATMENT", {"Brew_ID": bid, "Water_Stream": "Mash",
                         "Volume_L": m_vol, "Gypsum_g": m_gyp, "CaCl2_g": m_cacl,
@@ -719,7 +732,9 @@ else:
                         update_cell_by_key("INVENTORY", "Item", item,
                                            "Current_Qty", round(stock - deduct, 4))
                     msg = "წყლის მონაცემი შენახულია."
-                    if deductions:
+                    if hist_mode:
+                        msg += " 📜 ისტორიული რეჟიმი — მარაგი უცვლელია."
+                    elif deductions:
                         parts = ", ".join(f"{salt} {d:g}{u}"
                                           for salt, (_, _, d, u) in deductions.items())
                         msg += f" მარაგიდან ჩამოეჭრა: {parts}."
@@ -818,7 +833,7 @@ else:
                 malt_inv_unit = str(malt_inv.get("Unit", "") or "").strip()
                 # stock converted into the form's unit (kg) → live cap
                 malt_cap = convert_to_inventory_unit(malt_stock, malt_inv_unit, "kg")
-                if malt_cap is None:
+                if malt_cap is None and not hist_mode:
                     st.error(f"ერთეულები შეუთავსებელია: ფორმაში kg, მარაგში "
                              f"'{malt_inv_unit}' — ჩამოჭრა ვერ გამოითვლება. "
                              f"გაასწორე ამ item-ის ერთეული INVENTORY-ში.")
@@ -827,7 +842,8 @@ else:
                     f"რაოდენობა (kg) — მარაგში {malt_cap:g} kg" if malt_cap is not None
                     else "რაოდენობა (kg)",
                     min_value=0.0,
-                    max_value=malt_cap if (malt_cap and malt_cap > 0) else None,
+                    # historical entries may exceed today's stock — no cap then
+                    max_value=malt_cap if (malt_cap and malt_cap > 0 and not hist_mode) else None,
                     key="malt_qty", disabled=locked)
                 malt_just = c2.text_input("დასაბუთება", key="malt_just", disabled=locked)
                 malt_deduct = convert_to_inventory_unit(malt_qty, "kg", malt_inv_unit)
@@ -839,7 +855,9 @@ else:
                                  if not malt_steps.empty
                                  and {"Brew_ID", "Category", "Item"} <= set(malt_steps.columns)
                                  else pd.DataFrame())
-                if malt_deduct:
+                if hist_mode:
+                    st.caption("📜 ისტორიული რეჟიმი — მარაგიდან არ ჩამოეჭრება.")
+                elif malt_deduct:
                     if not malt_existing.empty:
                         prev = _num(malt_existing.iloc[0].get("Qty"))
                         st.caption(f"უკვე დამატებულია {prev:g} kg — დაემატება ჯამში "
@@ -848,10 +866,10 @@ else:
                     else:
                         st.caption(f"მარაგიდან ჩამოეჭრება: {malt_deduct:g} {malt_inv_unit}")
                 if st.button("დამატება (ალაო)", disabled=locked) and malt_qty > 0:
-                    if malt_deduct is None:
+                    if not hist_mode and malt_deduct is None:
                         st.error("ერთეულები შეუთავსებელია — ჩანაწერი არ შენახულა, "
                                  "ჩამოჭრა არ მომხდარა.")
-                    elif malt_deduct > malt_stock:
+                    elif not hist_mode and malt_deduct > malt_stock:
                         st.error(f"მარაგშია მხოლოდ {malt_stock:g} {malt_inv_unit}, "
                                  f"მოთხოვნილია {malt_deduct:g} {malt_inv_unit}.")
                     else:
@@ -864,8 +882,9 @@ else:
                                 "Item": malt_name, "Qty": malt_qty, "Unit": "kg",
                                 "Justification": malt_just,
                             })
-                        update_cell_by_key("INVENTORY", "Item", malt_name,
-                                           "Current_Qty", round(malt_stock - malt_deduct, 4))
+                        if not hist_mode:
+                            update_cell_by_key("INVENTORY", "Item", malt_name,
+                                               "Current_Qty", round(malt_stock - malt_deduct, 4))
                         st.rerun()
 
             steps_df = get_df("BREW_STEPS")
@@ -892,7 +911,7 @@ else:
                 hop_aa = str(hop_inv_row.get("AA_%_if_hop", "") or "")
                 # stock converted into the form's unit (g) → live cap
                 hop_cap = convert_to_inventory_unit(hop_stock, hop_inv_unit, "g")
-                if hop_cap is None:
+                if hop_cap is None and not hist_mode:
                     st.error(f"ერთეულები შეუთავსებელია: ფორმაში g, მარაგში "
                              f"'{hop_inv_unit}' — ჩამოჭრა ვერ გამოითვლება. "
                              f"გაასწორე ამ item-ის ერთეული INVENTORY-ში.")
@@ -901,7 +920,8 @@ else:
                     f"რაოდენობა (g) — მარაგში {hop_cap:g} g" if hop_cap is not None
                     else "რაოდენობა (g)",
                     min_value=0.0,
-                    max_value=hop_cap if (hop_cap and hop_cap > 0) else None,
+                    # historical entries may exceed today's stock — no cap then
+                    max_value=hop_cap if (hop_cap and hop_cap > 0 and not hist_mode) else None,
                     key="hop_qty", disabled=locked)
                 hop_timing = c2.selectbox("დრო", ["60წთ", "30წთ", "15წთ", "5წთ", "0", "Whirlpool"], key="hop_timing", disabled=locked)
                 c3.text_input("AA% (INVENTORY-დან)", value=hop_aa, disabled=True, key="hop_aa_display")
@@ -915,7 +935,9 @@ else:
                                 if not hop_steps.empty
                                 and {"Brew_ID", "Category", "Item"} <= set(hop_steps.columns)
                                 else pd.DataFrame())
-                if hop_deduct:
+                if hist_mode:
+                    st.caption("📜 ისტორიული რეჟიმი — მარაგიდან არ ჩამოეჭრება.")
+                elif hop_deduct:
                     if not hop_existing.empty:
                         prev = _num(hop_existing.iloc[0].get("Qty"))
                         st.caption(f"უკვე დამატებულია {prev:g} g — დაემატება ჯამში "
@@ -924,10 +946,10 @@ else:
                     else:
                         st.caption(f"მარაგიდან ჩამოეჭრება: {hop_deduct:g} {hop_inv_unit}")
                 if st.button("დამატება (ჰოპი)", disabled=locked) and hop_qty > 0:
-                    if hop_deduct is None:
+                    if not hist_mode and hop_deduct is None:
                         st.error("ერთეულები შეუთავსებელია — ჩანაწერი არ შენახულა, "
                                  "ჩამოჭრა არ მომხდარა.")
-                    elif hop_deduct > hop_stock:
+                    elif not hist_mode and hop_deduct > hop_stock:
                         st.error(f"მარაგშია მხოლოდ {hop_stock:g} {hop_inv_unit}, "
                                  f"მოთხოვნილია {hop_deduct:g} {hop_inv_unit}.")
                     else:
@@ -940,8 +962,9 @@ else:
                                 "Item": hop_name, "Qty": hop_qty, "Unit": "g",
                                 "Timing": hop_timing, "AA_%": hop_aa, "Justification": hop_just,
                             })
-                        update_cell_by_key("INVENTORY", "Item", hop_name,
-                                           "Current_Qty", round(hop_stock - hop_deduct, 4))
+                        if not hist_mode:
+                            update_cell_by_key("INVENTORY", "Item", hop_name,
+                                               "Current_Qty", round(hop_stock - hop_deduct, 4))
                         st.rerun()
 
             c1, c2 = st.columns(2)
