@@ -148,7 +148,13 @@ def ws(name):
 
 @st.cache_data(ttl=15, show_spinner=False)
 def get_df(name):
-    data = ws(name).get_all_records()
+    w = ws(name)
+    data = w.get_all_records()
+    if not data:
+        # empty sheet: keep the real columns so downstream df["col"]
+        # filters don't KeyError
+        headers = w.row_values(1)
+        return pd.DataFrame(columns=headers)
     return pd.DataFrame(data)
 
 def append_row(name, row_dict):
