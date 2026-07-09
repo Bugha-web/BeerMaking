@@ -481,7 +481,9 @@ else:
             start = st.form_submit_button("ხარშვის დაწყება")
             if start and style:
                 bid = new_id("BREW")
-                display_name = f"ხარშვა {len(headers_df) + 1} — {style}"
+                # +2 offset: brews 1 & 2 were lost, so numbering starts higher
+                # to stay consistent with the renumbered existing brews
+                display_name = f"ხარშვა {len(headers_df) + 1 + 2} — {style}"
                 append_row("BREW_HEADER", {
                     "Brew_ID": bid, "Date": str(b_date), "Beer_Style": style,
                     "Fermenter": ferm, "Target_Vol_L": target_vol, "Water_uS": water_us,
@@ -933,8 +935,15 @@ else:
                     # historical entries may exceed today's stock — no cap then
                     max_value=hop_cap if (hop_cap and hop_cap > 0 and not hist_mode) else None,
                     key="hop_qty", disabled=locked)
-                hop_timing = c2.selectbox("დრო", ["60წთ", "30წთ", "15წთ", "5წთ", "0", "Whirlpool"], key="hop_timing", disabled=locked)
+                hop_timing_sel = c2.selectbox(
+                    "დრო", ["60წთ", "30წთ", "15წთ", "5წთ", "0", "Whirlpool", "სხვა"],
+                    key="hop_timing", disabled=locked)
                 c3.text_input("AA% (INVENTORY-დან)", value=hop_aa, disabled=True, key="hop_aa_display")
+                if hop_timing_sel == "სხვა":
+                    hop_timing = st.text_input("დრო — ხელით (მაგ. 45წთ, 20წთ)",
+                                               key="hop_timing_custom", disabled=locked).strip()
+                else:
+                    hop_timing = hop_timing_sel
                 hop_just = st.text_input("დასაბუთება", key="hop_just", disabled=locked)
                 hop_deduct = convert_to_inventory_unit(hop_qty, "g", hop_inv_unit)
                 # Phase E: true duplicate for hops = same Brew_ID+Category+Item
@@ -959,7 +968,9 @@ else:
                     else:
                         st.caption(f"მარაგიდან ჩამოეჭრება: {hop_deduct:g} {hop_inv_unit}")
                 if st.button("დამატება (ჰოპი)", disabled=locked) and hop_qty > 0:
-                    if not hist_mode and hop_deduct is None:
+                    if not str(hop_timing).strip():
+                        st.error("შეავსე Timing (ხელით არჩეულ „სხვა“-ზე ცარიელია).")
+                    elif not hist_mode and hop_deduct is None:
                         st.error("ერთეულები შეუთავსებელია — ჩანაწერი არ შენახულა, "
                                  "ჩამოჭრა არ მომხდარა.")
                     elif not hist_mode and hop_deduct > hop_stock:
@@ -1011,19 +1022,37 @@ else:
         if st.session_state.brew_tab == "🧪 ფერმენტაცია/Gravity":
             locked = lock_gate(row.get("FG_Date"), f"edit_ovr_ferm_{bid}") if fg_done else False
             st.markdown("**ყოველდღიური Gravity-ის ჩაწერა**")
+            # date + auto Day_# live OUTSIDE the form (form widgets don't
+            # recompute until submit, so the day counter must live here)
+            gd1, gd2 = st.columns(2)
+            g_date = gd1.date_input("თარიღი", value=date.today(), key="g_date", disabled=locked)
+            start_raw = str(row.get("Date", "")).strip()
+            try:
+                start_date = pd.to_datetime(start_raw).date()
+            except (ValueError, TypeError):
+                start_date = None
+            day_number = (g_date - start_date).days if start_date is not None else 0
+            gd2.number_input("დღე # (ავტომატური)", value=int(day_number), disabled=True)
+            date_error = False
+            if start_date is None:
+                st.warning("header-ში ხარშვის Date ვერ წავიკითხე — Day_# ვერ დაითვალა.")
+            elif day_number < 0:
+                date_error = True
+                st.error(f"არჩეული თარიღი ({g_date}) ხარშვის დაწყებამდეა "
+                         f"({start_date}) — Day_# უარყოფითია. გაასწორე თარიღი.")
             with st.form("gravity_add", clear_on_submit=True):
-                c1, c2, c3, c4 = st.columns(4)
-                g_date = c1.date_input("თარიღი", value=date.today(), disabled=locked)
-                g_day = c2.number_input("დღე #", min_value=0, step=1, disabled=locked)
-                g_raw = c3.number_input("Gravity (°P) — ჰიდრომეტრიდან, დაუკორექტირებელი", disabled=locked)
-                g_temp = c4.number_input("ტემპერატურა (°C)", value=20.0, disabled=locked)
+                c1, c2 = st.columns(2)
+                g_raw = c1.number_input("Gravity (°P) — ჰიდრომეტრიდან, დაუკორექტირებელი", disabled=locked)
+                g_temp = c2.number_input("ტემპერატურა (°C)", value=10.0, disabled=locked)
                 is_final = st.checkbox("ეს არის საბოლოო (FG) გაზომვა", disabled=locked)
                 add_g = st.form_submit_button("დამატება", disabled=locked)
-                if add_g:
+                if add_g and date_error:
+                    st.error("თარიღი ხარშვის დაწყებამდეა — ჩანაწერი არ დაემატა.")
+                elif add_g:
                     ref_temp = _num(get_setting("Hydrometer_Ref_Temp_C", 20), 20)
                     corrected = correct_gravity_plato(g_raw, g_temp, ref_temp)
                     append_row("BREW_GRAVITY_LOG", {
-                        "Brew_ID": bid, "Date": str(g_date), "Day_#": g_day,
+                        "Brew_ID": bid, "Date": str(g_date), "Day_#": day_number,
                         "Gravity_P_Raw": g_raw, "Temp_C": g_temp, "Instrument": "hydro",
                         "Gravity_P_Corrected": corrected if corrected is not None else "",
                     })
