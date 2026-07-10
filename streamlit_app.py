@@ -421,12 +421,14 @@ if page == "📦 Inventory":
         qty = c4.number_input("რაოდენობა", min_value=0.0, step=1.0)
         low = c5.number_input("Low threshold", min_value=0.0, step=1.0)
         aa = c6.text_input("AA% (თუ ჰოპია)")
-        notes = st.text_input("შენიშვნა")
+        c7, c8 = st.columns(2)
+        ebc = c7.text_input("EBC (თუ ალაოა)")
+        notes = c8.text_input("შენიშვნა")
         submitted = st.form_submit_button("დამატება")
         if submitted and item:
             append_row("INVENTORY", {
                 "Item": item, "Category": cat, "Unit": unit, "Current_Qty": qty,
-                "AA_%_if_hop": aa, "Low_Threshold": low,
+                "AA_%_if_hop": aa, "EBC": ebc, "Low_Threshold": low,
                 "Received_Date": str(date.today()), "Notes": notes,
             })
             st.success(f"{item} დაემატა.")
@@ -543,6 +545,15 @@ else:
                 c1.markdown(f"**სტილი**  \n{_show(row.get('Beer_Style'))}")
                 c2.markdown(f"**თარიღი**  \n{_show(row.get('Date'))}")
                 c3.markdown(f"**ფერმენტორი**  \n{_show(row.get('Fermenter'))}")
+
+                yeast_name_v = _show(row.get("Yeast"))
+                if yeast_name_v != "—":
+                    yform_v = _show(row.get("Yeast_Form"))
+                    ygen_v = _show(row.get("Yeast_Generation"))
+                    yline = yeast_name_v + (f" · {yform_v}" if yform_v != "—" else "")
+                    if str(yform_v).startswith("ლექი") and ygen_v != "—":
+                        yline += f" · თაობა {ygen_v}"
+                    st.markdown(f"**🧫 საფუარი:** {yline}")
 
                 c1, c2, c3, c4 = st.columns(4, gap="large")
                 c1.metric("Target OG (°P)", _show(row.get("Target_OG_P")))
@@ -1021,6 +1032,46 @@ else:
         # ---- FERMENT / GRAVITY TAB ----
         if st.session_state.brew_tab == "🧪 ფერმენტაცია/Gravity":
             locked = lock_gate(row.get("FG_Date"), f"edit_ovr_ferm_{bid}") if fg_done else False
+
+            # --- yeast pitch: which yeast, dry vs slurry, + reuse generation ---
+            st.markdown("**🧫 საფუარი (yeast pitch)**")
+            yc1, yc2 = st.columns(2)
+            yeast_name = yc1.text_input("საფუარი (strain/სახელი)",
+                value=str(row.get("Yeast", "") or ""), key=f"yeast_name_{bid}", disabled=locked)
+            form_opts = ["ფხვნილი (dry)", "ლექი (slurry)"]
+            default_idx = 1 if str(row.get("Yeast_Form", "")).startswith("ლექი") else 0
+            yeast_form = yc2.radio("ფორმა", form_opts, index=default_idx,
+                horizontal=True, key=f"yeast_form_{bid}", disabled=locked)
+            is_slurry = yeast_form.startswith("ლექი")
+            if is_slurry:
+                # auto-count prior slurry uses of this strain in OTHER brews
+                prior = 0
+                if yeast_name.strip() and not headers_df.empty and "Yeast" in headers_df.columns:
+                    for _, hr in headers_df.iterrows():
+                        if (str(hr.get("Brew_ID")) != bid
+                                and str(hr.get("Yeast", "")).strip().lower() == yeast_name.strip().lower()
+                                and str(hr.get("Yeast_Form", "")).startswith("ლექი")):
+                            prior += 1
+                saved_gen = int(_num(row.get("Yeast_Generation"), 0))
+                # no key on this input: value= always reflects the live suggestion
+                yeast_gen = st.number_input(
+                    "თაობა (generation) — რამდენჯერ იქნა ეს ლექი გამოყენებული",
+                    min_value=1, value=max(1, saved_gen or (prior + 1)), step=1, disabled=locked)
+                st.caption(f"ავტო-შეფასება: ამ strain-ის {prior} წინა ლექ-გამოყენება "
+                           f"სხვა ხარშვებში → თაობა {prior + 1} (ხელით შეასწორე თუ საჭიროა).")
+            else:
+                yeast_gen = None
+            if st.button("💾 საფუარის შენახვა", disabled=locked):
+                form_val = "ლექი" if is_slurry else "ფხვნილი"
+                update_cell_by_key("BREW_HEADER", "Brew_ID", bid, "Yeast", yeast_name)
+                update_cell_by_key("BREW_HEADER", "Brew_ID", bid, "Yeast_Form", form_val)
+                update_cell_by_key("BREW_HEADER", "Brew_ID", bid, "Yeast_Generation",
+                                   int(yeast_gen) if is_slurry else "")
+                st.success(f"საფუარი შენახულია: {yeast_name} ({form_val}"
+                           + (f", თაობა {int(yeast_gen)}" if is_slurry else "") + ").")
+                st.rerun()
+            st.divider()
+
             st.markdown("**ყოველდღიური Gravity-ის ჩაწერა**")
             # date + auto Day_# live OUTSIDE the form (form widgets don't
             # recompute until submit, so the day counter must live here)
