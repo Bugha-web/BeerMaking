@@ -580,7 +580,7 @@ else:
                 if not water_b.empty:
                     wcols = [c for c in ["Water_Stream", "Volume_L", "Gypsum_g", "CaCl2_g",
                                          "Lactic_ml", "Target_pH"] if c in water_b.columns]
-                    st.dataframe(water_b[wcols], width="stretch", hide_index=True)
+                    st.dataframe(water_b[wcols], use_container_width=True, hide_index=True)
                 else:
                     st.caption("წყლის მონაცემი ჯერ არ არის შენახული.")
 
@@ -591,7 +591,7 @@ else:
                           if not steps_b.empty and "Category" in steps_b.columns else pd.DataFrame())
                 if not malt_b.empty:
                     mcols = [c for c in ["Item", "Qty", "Unit", "Justification"] if c in malt_b.columns]
-                    st.dataframe(malt_b[mcols], width="stretch", hide_index=True)
+                    st.dataframe(malt_b[mcols], use_container_width=True, hide_index=True)
                     total_grain = sum(_num(x) for x in malt_b["Qty"])
                     st.metric("ჯამური Total_Grain_kg", f"{total_grain:g} kg")
                 else:
@@ -605,7 +605,7 @@ else:
                 if not mash_b.empty:
                     mscols = [c for c in ["Item", "Qty", "Unit", "Timing", "Justification"]
                               if c in mash_b.columns]
-                    st.dataframe(mash_b[mscols], width="stretch", hide_index=True)
+                    st.dataframe(mash_b[mscols], use_container_width=True, hide_index=True)
                 else:
                     st.caption("Mash schedule ჯერ არ არის შევსებული.")
 
@@ -621,7 +621,7 @@ else:
                     hop_b = hop_b.sort_values("_o")
                     hcols = [c for c in ["Item", "Qty", "Unit", "Timing", "AA_%", "Justification"]
                              if c in hop_b.columns]
-                    st.dataframe(hop_b[hcols], width="stretch", hide_index=True)
+                    st.dataframe(hop_b[hcols], use_container_width=True, hide_index=True)
                 else:
                     st.caption("ჰოპი ჯერ არ არის დამატებული.")
 
@@ -641,7 +641,7 @@ else:
                     last_cols = [c for c in ["Day_#", "Date", "Gravity_P_Raw", "Gravity_P_Corrected",
                                              "Temp_C"] if c in gv.columns]
                     st.write("**ბოლო 3 გაზომვა:**")
-                    st.dataframe(gv[last_cols].tail(3), width="stretch", hide_index=True)
+                    st.dataframe(gv[last_cols].tail(3), use_container_width=True, hide_index=True)
                 else:
                     st.caption("Gravity log ჯერ ცარიელია.")
 
