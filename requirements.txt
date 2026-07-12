@@ -1,4 +1,6 @@
-streamlit
-gspread
-google-auth
-pandas
+streamlit==1.38.0
+gspread==6.1.4
+google-auth==2.34.0
+pandas==2.2.3
+pyarrow==17.0.0
+numpy==1.26.4
