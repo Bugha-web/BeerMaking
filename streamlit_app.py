@@ -259,12 +259,18 @@ def lock_gate(fg_date, key):
                f"ცვლილება არ არის რეკომენდებული.")
     return not st.checkbox("მაინც მინდა რედაქტირება", key=key)
 
-def update_step_qty(bid, category, item, new_qty, timing=None):
+def brew_day_selector(key, disabled=False):
+    """Day picker for 2-day brews (800 L per day). Every inventory-deducting
+    entry is tagged with its brew day so day 1 and day 2 stay separate."""
+    return st.radio("ხარშვის დღე", [1, 2], horizontal=True, key=key, disabled=disabled)
+
+def update_step_qty(bid, category, item, new_qty, timing=None, brew_day=None):
     """Update the Qty of the BREW_STEPS row matching Brew_ID + Category + Item
     (a multi-column match — update_cell_by_key can't do that, it keys on one
-    column). When timing is given (hops), the Timing column must match too:
-    the same hop at a different timing is a separate addition, not a
-    duplicate. Returns True if a row was found and updated."""
+    column). When timing is given (hops) the Timing column must match too, and
+    when brew_day is given the Brew_Day column must match: the same ingredient
+    on another brew day is a separate addition, not a duplicate.
+    Returns True if a row was found and updated."""
     w = ws("BREW_STEPS")
     values = w.get_all_values()
     if not values:
@@ -274,12 +280,14 @@ def update_step_qty(bid, category, item, new_qty, timing=None):
         bi, ci, ii, qi = (headers.index("Brew_ID"), headers.index("Category"),
                           headers.index("Item"), headers.index("Qty"))
         ti = headers.index("Timing") if timing is not None else None
+        di = headers.index("Brew_Day") if brew_day is not None else None
     except ValueError:
         return False
     for ridx, rowv in enumerate(values[1:], start=2):
         if (len(rowv) > max(bi, ci, ii) and rowv[bi] == bid
                 and rowv[ci] == category and rowv[ii] == item
-                and (ti is None or (len(rowv) > ti and rowv[ti] == str(timing)))):
+                and (ti is None or (len(rowv) > ti and rowv[ti] == str(timing)))
+                and (di is None or (len(rowv) > di and rowv[di] == str(brew_day)))):
             w.update_cell(ridx, qi + 1, new_qty)
             get_df.clear()
             return True
@@ -475,7 +483,7 @@ else:
             style = c2.text_input("ლუდის სტილი", placeholder="მაგ. Märzen/Oktoberfest")
             ferm = c3.selectbox("ფერმენტორი", ["CCT1", "CCT2"])
             c4, c5 = st.columns(2)
-            target_vol = c4.number_input("სამიზნე მოცულობა (L)", min_value=0.0, value=850.0)
+            target_vol = c4.number_input("სამიზნე მოცულობა (L)", min_value=0.0, value=800.0)
             water_us = c5.number_input("წყლის Water_uS", min_value=0.0, value=70.0)
             c6, c7 = st.columns(2)
             target_og = c6.number_input("Target OG (°P)", min_value=0.0, step=0.1)
@@ -578,8 +586,8 @@ else:
                 c2.metric("Total CaCl₂ (g)", _show(row.get("Total_CaCl2_g")))
                 c3.metric("Total Lactic (ml)", _show(row.get("Total_Lactic_ml")))
                 if not water_b.empty:
-                    wcols = [c for c in ["Water_Stream", "Volume_L", "Gypsum_g", "CaCl2_g",
-                                         "Lactic_ml", "Target_pH"] if c in water_b.columns]
+                    wcols = [c for c in ["Brew_Day", "Water_Stream", "Volume_L", "Gypsum_g",
+                                         "CaCl2_g", "Lactic_ml", "Target_pH"] if c in water_b.columns]
                     st.dataframe(water_b[wcols], use_container_width=True, hide_index=True)
                 else:
                     st.caption("წყლის მონაცემი ჯერ არ არის შენახული.")
@@ -590,7 +598,8 @@ else:
                 malt_b = (steps_b[steps_b["Category"] == "Malt"]
                           if not steps_b.empty and "Category" in steps_b.columns else pd.DataFrame())
                 if not malt_b.empty:
-                    mcols = [c for c in ["Item", "Qty", "Unit", "Justification"] if c in malt_b.columns]
+                    mcols = [c for c in ["Brew_Day", "Item", "Qty", "Unit", "Justification"]
+                             if c in malt_b.columns]
                     st.dataframe(malt_b[mcols], use_container_width=True, hide_index=True)
                     total_grain = sum(_num(x) for x in malt_b["Qty"])
                     st.metric("ჯამური Total_Grain_kg", f"{total_grain:g} kg")
@@ -619,8 +628,8 @@ else:
                     hop_b = hop_b.copy()
                     hop_b["_o"] = hop_b["Timing"].map(lambda t: hop_order.get(str(t), 99))
                     hop_b = hop_b.sort_values("_o")
-                    hcols = [c for c in ["Item", "Qty", "Unit", "Timing", "AA_%", "Justification"]
-                             if c in hop_b.columns]
+                    hcols = [c for c in ["Brew_Day", "Item", "Qty", "Unit", "Timing", "AA_%",
+                                         "Justification"] if c in hop_b.columns]
                     st.dataframe(hop_b[hcols], use_container_width=True, hide_index=True)
                 else:
                     st.caption("ჰოპი ჯერ არ არის დამატებული.")
@@ -675,6 +684,7 @@ else:
         # ---- WATER TAB ----
         if st.session_state.brew_tab == "💧 წყალი":
             locked = lock_gate(row.get("FG_Date"), f"edit_ovr_water_{bid}") if fg_done else False
+            water_day = brew_day_selector("water_day", disabled=locked)
             profiles_df = get_df("WATER_PROFILES")
             profile_names = sorted(profiles_df["Profile_Name"].unique()) if not profiles_df.empty else []
             chosen_profile = st.selectbox("წყლის პროფილი (თუ შენახული გაქვს)",
@@ -747,14 +757,14 @@ else:
                 if not blocked:
                     append_row("WATER_TREATMENT", {"Brew_ID": bid, "Water_Stream": "Mash",
                         "Volume_L": m_vol, "Gypsum_g": m_gyp, "CaCl2_g": m_cacl,
-                        "Lactic_ml": m_lac, "Target_pH": m_ph})
+                        "Lactic_ml": m_lac, "Target_pH": m_ph, "Brew_Day": water_day})
                     append_row("WATER_TREATMENT", {"Brew_ID": bid, "Water_Stream": "Sparge",
                         "Volume_L": s_vol, "Gypsum_g": s_gyp, "CaCl2_g": s_cacl,
-                        "Lactic_ml": s_lac, "Target_pH": s_ph})
+                        "Lactic_ml": s_lac, "Target_pH": s_ph, "Brew_Day": water_day})
                     for salt, (item, stock, deduct, inv_unit) in deductions.items():
                         update_cell_by_key("INVENTORY", "Item", item,
                                            "Current_Qty", round(stock - deduct, 4))
-                    msg = "წყლის მონაცემი შენახულია."
+                    msg = f"წყლის მონაცემი შენახულია (დღე {water_day})."
                     if hist_mode:
                         msg += " 📜 ისტორიული რეჟიმი — მარაგი უცვლელია."
                     elif deductions:
@@ -860,7 +870,7 @@ else:
                     st.error(f"ერთეულები შეუთავსებელია: ფორმაში kg, მარაგში "
                              f"'{malt_inv_unit}' — ჩამოჭრა ვერ გამოითვლება. "
                              f"გაასწორე ამ item-ის ერთეული INVENTORY-ში.")
-                c1, c2 = st.columns(2)
+                c1, c2, c3 = st.columns([2, 1, 2])
                 malt_qty = c1.number_input(
                     f"რაოდენობა (kg) — მარაგში {malt_cap:g} kg" if malt_cap is not None
                     else "რაოდენობა (kg)",
@@ -868,26 +878,31 @@ else:
                     # historical entries may exceed today's stock — no cap then
                     max_value=malt_cap if (malt_cap and malt_cap > 0 and not hist_mode) else None,
                     key="malt_qty", disabled=locked)
-                malt_just = c2.text_input("დასაბუთება", key="malt_just", disabled=locked)
+                with c2:
+                    malt_day = brew_day_selector("malt_day", disabled=locked)
+                malt_just = c3.text_input("დასაბუთება", key="malt_just", disabled=locked)
                 malt_deduct = convert_to_inventory_unit(malt_qty, "kg", malt_inv_unit)
-                # Phase E: same Brew_ID+Category+Item already added?
+                # duplicate = same Brew_ID+Category+Item AND same brew day —
+                # day 1 and day 2 of the same malt stay separate rows
                 malt_steps = get_df("BREW_STEPS")
                 malt_existing = (malt_steps[(malt_steps["Brew_ID"] == bid)
                                             & (malt_steps["Category"] == "Malt")
-                                            & (malt_steps["Item"] == malt_name)]
+                                            & (malt_steps["Item"] == malt_name)
+                                            & (malt_steps["Brew_Day"].astype(str) == str(malt_day))]
                                  if not malt_steps.empty
-                                 and {"Brew_ID", "Category", "Item"} <= set(malt_steps.columns)
+                                 and {"Brew_ID", "Category", "Item", "Brew_Day"} <= set(malt_steps.columns)
                                  else pd.DataFrame())
                 if hist_mode:
                     st.caption("📜 ისტორიული რეჟიმი — მარაგიდან არ ჩამოეჭრება.")
                 elif malt_deduct:
                     if not malt_existing.empty:
                         prev = _num(malt_existing.iloc[0].get("Qty"))
-                        st.caption(f"უკვე დამატებულია {prev:g} kg — დაემატება ჯამში "
-                                   f"{prev + malt_qty:g} kg. მარაგიდან ჩამოეჭრება: "
-                                   f"{malt_deduct:g} {malt_inv_unit}")
+                        st.caption(f"დღე {malt_day}-ზე უკვე დამატებულია {prev:g} kg — "
+                                   f"დაემატება ჯამში {prev + malt_qty:g} kg. "
+                                   f"მარაგიდან ჩამოეჭრება: {malt_deduct:g} {malt_inv_unit}")
                     else:
-                        st.caption(f"მარაგიდან ჩამოეჭრება: {malt_deduct:g} {malt_inv_unit}")
+                        st.caption(f"დღე {malt_day} · მარაგიდან ჩამოეჭრება: "
+                                   f"{malt_deduct:g} {malt_inv_unit}")
                 if st.button("დამატება (ალაო)", disabled=locked) and malt_qty > 0:
                     if not hist_mode and malt_deduct is None:
                         st.error("ერთეულები შეუთავსებელია — ჩანაწერი არ შენახულა, "
@@ -898,12 +913,13 @@ else:
                     else:
                         if not malt_existing.empty:
                             new_total = round(_num(malt_existing.iloc[0].get("Qty")) + malt_qty, 4)
-                            update_step_qty(bid, "Malt", malt_name, new_total)
+                            update_step_qty(bid, "Malt", malt_name, new_total,
+                                            brew_day=malt_day)
                         else:
                             append_row("BREW_STEPS", {
                                 "Brew_ID": bid, "Stage": "Mash", "Category": "Malt",
                                 "Item": malt_name, "Qty": malt_qty, "Unit": "kg",
-                                "Justification": malt_just,
+                                "Justification": malt_just, "Brew_Day": malt_day,
                             })
                         if not hist_mode:
                             update_cell_by_key("INVENTORY", "Item", malt_name,
@@ -955,29 +971,34 @@ else:
                                                key="hop_timing_custom", disabled=locked).strip()
                 else:
                     hop_timing = hop_timing_sel
-                hop_just = st.text_input("დასაბუთება", key="hop_just", disabled=locked)
+                hd1, hd2 = st.columns([1, 2])
+                with hd1:
+                    hop_day = brew_day_selector("hop_day", disabled=locked)
+                hop_just = hd2.text_input("დასაბუთება", key="hop_just", disabled=locked)
                 hop_deduct = convert_to_inventory_unit(hop_qty, "g", hop_inv_unit)
-                # Phase E: true duplicate for hops = same Brew_ID+Category+Item
-                # AND Timing. Same hop at another timing is a separate addition
-                # (e.g. Tradition@30წთ vs Tradition@0წთ must stay two rows).
+                # true duplicate for hops = same Brew_ID+Category+Item AND Timing
+                # AND brew day. Same hop at another timing OR another day is a
+                # separate addition (Tradition@30წთ day1 vs day2 = two rows).
                 hop_steps = get_df("BREW_STEPS")
                 hop_existing = (hop_steps[(hop_steps["Brew_ID"] == bid)
                                           & (hop_steps["Category"] == "Hop")
                                           & (hop_steps["Item"] == hop_name)
-                                          & (hop_steps["Timing"].astype(str) == str(hop_timing))]
+                                          & (hop_steps["Timing"].astype(str) == str(hop_timing))
+                                          & (hop_steps["Brew_Day"].astype(str) == str(hop_day))]
                                 if not hop_steps.empty
-                                and {"Brew_ID", "Category", "Item", "Timing"} <= set(hop_steps.columns)
+                                and {"Brew_ID", "Category", "Item", "Timing", "Brew_Day"} <= set(hop_steps.columns)
                                 else pd.DataFrame())
                 if hist_mode:
                     st.caption("📜 ისტორიული რეჟიმი — მარაგიდან არ ჩამოეჭრება.")
                 elif hop_deduct:
                     if not hop_existing.empty:
                         prev = _num(hop_existing.iloc[0].get("Qty"))
-                        st.caption(f"უკვე დამატებულია {prev:g} g ({hop_timing}) — "
-                                   f"დაემატება ჯამში {prev + hop_qty:g} g. "
+                        st.caption(f"დღე {hop_day} · {hop_timing}-ზე უკვე დამატებულია "
+                                   f"{prev:g} g — დაემატება ჯამში {prev + hop_qty:g} g. "
                                    f"მარაგიდან ჩამოეჭრება: {hop_deduct:g} {hop_inv_unit}")
                     else:
-                        st.caption(f"მარაგიდან ჩამოეჭრება: {hop_deduct:g} {hop_inv_unit}")
+                        st.caption(f"დღე {hop_day} · მარაგიდან ჩამოეჭრება: "
+                                   f"{hop_deduct:g} {hop_inv_unit}")
                 if st.button("დამატება (ჰოპი)", disabled=locked) and hop_qty > 0:
                     if not str(hop_timing).strip():
                         st.error("შეავსე Timing (ხელით არჩეულ „სხვა“-ზე ცარიელია).")
@@ -991,12 +1012,13 @@ else:
                         if not hop_existing.empty:
                             new_total = round(_num(hop_existing.iloc[0].get("Qty")) + hop_qty, 4)
                             update_step_qty(bid, "Hop", hop_name, new_total,
-                                            timing=hop_timing)
+                                            timing=hop_timing, brew_day=hop_day)
                         else:
                             append_row("BREW_STEPS", {
                                 "Brew_ID": bid, "Stage": "Boil", "Category": "Hop",
                                 "Item": hop_name, "Qty": hop_qty, "Unit": "g",
-                                "Timing": hop_timing, "AA_%": hop_aa, "Justification": hop_just,
+                                "Timing": hop_timing, "AA_%": hop_aa,
+                                "Justification": hop_just, "Brew_Day": hop_day,
                             })
                         if not hist_mode:
                             update_cell_by_key("INVENTORY", "Item", hop_name,
