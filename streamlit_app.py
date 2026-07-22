@@ -259,10 +259,108 @@ def lock_gate(fg_date, key):
                f"ცვლილება არ არის რეკომენდებული.")
     return not st.checkbox("მაინც მინდა რედაქტირება", key=key)
 
-def brew_day_selector(key, disabled=False):
-    """Day picker for 2-day brews (800 L per day). Every inventory-deducting
-    entry is tagged with its brew day so day 1 and day 2 stay separate."""
-    return st.radio("ხარშვის დღე", [1, 2], horizontal=True, key=key, disabled=disabled)
+def delete_day_rows(sheet, bid, day, category=None):
+    """Delete rows for Brew_ID + Brew_Day (optionally + Category) so a day's
+    data can be replaced on re-save. Bottom-up delete; returns count."""
+    w = ws(sheet)
+    values = w.get_all_values()
+    if not values:
+        return 0
+    h = values[0]
+    try:
+        bi, di = h.index("Brew_ID"), h.index("Brew_Day")
+        ci = h.index("Category") if category is not None else None
+    except ValueError:
+        return 0
+    idxs = [i + 1 for i, r in enumerate(values)
+            if i > 0 and len(r) > max(bi, di) and r[bi] == bid and r[di] == str(day)
+            and (ci is None or (len(r) > ci and r[ci] == category))]
+    for i in reversed(idxs):
+        w.delete_rows(i)
+    if idxs:
+        get_df.clear()
+    return len(idxs)
+
+def water_defaults_for_day(bid, day, fallback):
+    """Return saved {Mash:{...}, Sparge:{...}} water values for a brew day.
+    If day 2 has nothing saved, fall back to day 1's saved values; if neither,
+    use `fallback` (profile / manual defaults). Enables day-2 pre-fill."""
+    df = get_df("WATER_TREATMENT")
+    def rows_for(d):
+        if df.empty or "Brew_Day" not in df.columns:
+            return {}
+        sub = df[(df["Brew_ID"] == bid) & (df["Brew_Day"].astype(str) == str(d))]
+        out = {}
+        for _, r in sub.iterrows():
+            out[str(r.get("Water_Stream"))] = r
+        return out
+    saved = rows_for(day) or (rows_for(1) if str(day) != "1" else {})
+    result = {}
+    for stream in ("Mash", "Sparge"):
+        r = saved.get(stream)
+        if r is not None:
+            result[stream] = {"vol": _num(r.get("Volume_L")), "gyp": _num(r.get("Gypsum_g")),
+                              "cacl2": _num(r.get("CaCl2_g")), "lac": _num(r.get("Lactic_ml")),
+                              "ph": _num(r.get("Target_pH"), fallback[stream]["ph"])}
+        else:
+            result[stream] = fallback[stream]
+    return result
+
+def mash_steps_df(bid, day):
+    """5-row editor DataFrame prefilled with a brew day's saved Mash_Step rows.
+    If day 2 has none, prefill from day 1 (day-2 defaults to day-1)."""
+    df = get_df("BREW_STEPS")
+    rows = []
+    if not df.empty and {"Brew_ID", "Category", "Brew_Day"} <= set(df.columns):
+        def sub_for(d):
+            return df[(df["Brew_ID"] == bid) & (df["Category"] == "Mash_Step")
+                      & (df["Brew_Day"].astype(str) == str(d))]
+        sub = sub_for(day)
+        if sub.empty and str(day) != "1":
+            sub = sub_for(1)
+        for _, r in sub.iterrows():
+            rows.append({"ტემპ (°C)": _num(r.get("Qty")),
+                         "ხანგრძლივობა (წთ)": int(_num(str(r.get("Timing", "")).replace("წთ", ""))),
+                         "შენიშვნა": str(r.get("Justification", "") or "")})
+    while len(rows) < 5:
+        rows.append({"ტემპ (°C)": 0.0, "ხანგრძლივობა (წთ)": 0, "შენიშვნა": ""})
+    out = pd.DataFrame(rows[:5])
+    out.insert(0, "საფეხური #", [1, 2, 3, 4, 5])
+    return out
+
+def copy_ingredients_day1_to_day2(bid, category, form_unit):
+    """Duplicate day-1 rows of a category (Malt/Hop) into day 2. Day 2 is a
+    real second 800 L batch, so it consumes inventory again — deducts per
+    item, skipping any that exceed stock (unless historical mode).
+    Returns (copied, skipped) item-name lists."""
+    steps = get_df("BREW_STEPS")
+    needed = {"Brew_ID", "Category", "Brew_Day", "Item", "Qty"}
+    if steps.empty or not needed <= set(steps.columns):
+        return [], []
+    d1 = steps[(steps["Brew_ID"] == bid) & (steps["Category"] == category)
+               & (steps["Brew_Day"].astype(str) == "1")]
+    inv = get_df("INVENTORY")
+    hist = st.session_state.get("historical_mode", False)
+    copied, skipped = [], []
+    for _, r in d1.iterrows():
+        item = r["Item"]
+        qty = _num(r.get("Qty"))
+        inv_row = (inv[inv["Item"] == item] if not inv.empty and "Item" in inv.columns
+                   else pd.DataFrame())
+        unit = str(inv_row.iloc[0].get("Unit", "") or "").strip() if not inv_row.empty else form_unit
+        stock = _num(inv_row.iloc[0].get("Current_Qty", 0)) if not inv_row.empty else 0
+        deduct = convert_to_inventory_unit(qty, form_unit, unit)
+        if not hist and (deduct is None or deduct > stock):
+            skipped.append(item)
+            continue
+        newrow = {c: r.get(c) for c in steps.columns if c}
+        newrow["Brew_Day"] = 2
+        append_row("BREW_STEPS", newrow)
+        if not hist and not inv_row.empty:
+            update_cell_by_key("INVENTORY", "Item", item, "Current_Qty",
+                               round(stock - deduct, 4))
+        copied.append(item)
+    return copied, skipped
 
 def update_step_qty(bid, category, item, new_qty, timing=None, brew_day=None):
     """Update the Qty of the BREW_STEPS row matching Brew_ID + Category + Item
@@ -524,6 +622,17 @@ else:
             index=BREW_TABS.index(st.session_state.brew_tab)
         )
 
+        # global brew-day selector — applies to the per-day tabs only
+        # (წყალი/მეშინგი/სვია). OG/Boil, საფუარი, gravity are day-independent.
+        PER_DAY_TABS = {"💧 წყალი", "🌾 მეშინგი", "🔥 დუღილი (boil/hop)"}
+        brew_day = 1
+        if st.session_state.brew_tab in PER_DAY_TABS:
+            brew_day = st.radio(
+                "ხარშვის დღე (თითო 800 L)", [1, 2], horizontal=True, key="brew_day_global")
+            if brew_day == 2:
+                st.caption("დღე 2 — ცარიელ ველებში default-ად დღე 1-ის მონაცემებია; "
+                           "შეცვალე რაც განსხვავდება. სვია/ალაოსთვის იხ. „დღე 1-ის კოპირება“ ღილაკი.")
+
         # ---- OVERVIEW TAB ----
         if st.session_state.brew_tab == "📊 მიმოხილვა":
             fg_confirmed = str(row.get("FG_Date", "")).strip() not in ("", "nan", "None")
@@ -581,14 +690,26 @@ else:
             # --- water summary card ---
             with st.container(border=True, key="ovcard-water"):
                 st.markdown("#### 💧 წყალი")
-                c1, c2, c3 = st.columns(3, gap="large")
-                c1.metric("Total Gypsum (g)", _show(row.get("Total_Gypsum_g")))
-                c2.metric("Total CaCl₂ (g)", _show(row.get("Total_CaCl2_g")))
-                c3.metric("Total Lactic (ml)", _show(row.get("Total_Lactic_ml")))
+                st.caption("ორივე დღის ჯამი (მოცულობა/მარილები); pH — საშუალო.")
+                def _wsum(col):
+                    return sum(_num(x) for x in water_b[col]) if (not water_b.empty and col in water_b.columns) else 0
+                def _wavg(col):
+                    vals = [_num(x) for x in water_b[col]] if (not water_b.empty and col in water_b.columns) else []
+                    vals = [v for v in vals if v]
+                    return round(sum(vals) / len(vals), 2) if vals else None
+                c1, c2, c3, c4 = st.columns(4, gap="large")
+                c1.metric("სულ მოცულობა (L)", f"{_wsum('Volume_L'):g}" if _wsum('Volume_L') else "—")
+                c2.metric("Total Gypsum (g)", f"{_wsum('Gypsum_g'):g}" if _wsum('Gypsum_g') else "—")
+                c3.metric("Total CaCl₂ (g)", f"{_wsum('CaCl2_g'):g}" if _wsum('CaCl2_g') else "—")
+                c4.metric("Total Lactic (ml)", f"{_wsum('Lactic_ml'):g}" if _wsum('Lactic_ml') else "—")
+                avg_ph = _wavg("Target_pH")
+                st.metric("საშ. Target pH", f"{avg_ph:g}" if avg_ph else "—")
                 if not water_b.empty:
                     wcols = [c for c in ["Brew_Day", "Water_Stream", "Volume_L", "Gypsum_g",
                                          "CaCl2_g", "Lactic_ml", "Target_pH"] if c in water_b.columns]
-                    st.dataframe(water_b[wcols], use_container_width=True, hide_index=True)
+                    st.dataframe(water_b.sort_values([c for c in ["Brew_Day", "Water_Stream"]
+                                 if c in water_b.columns])[wcols],
+                                 use_container_width=True, hide_index=True)
                 else:
                     st.caption("წყლის მონაცემი ჯერ არ არის შენახული.")
 
@@ -612,7 +733,7 @@ else:
                 mash_b = (steps_b[steps_b["Category"] == "Mash_Step"]
                           if not steps_b.empty and "Category" in steps_b.columns else pd.DataFrame())
                 if not mash_b.empty:
-                    mscols = [c for c in ["Item", "Qty", "Unit", "Timing", "Justification"]
+                    mscols = [c for c in ["Brew_Day", "Item", "Qty", "Unit", "Timing", "Justification"]
                               if c in mash_b.columns]
                     st.dataframe(mash_b[mscols], use_container_width=True, hide_index=True)
                 else:
@@ -684,13 +805,13 @@ else:
         # ---- WATER TAB ----
         if st.session_state.brew_tab == "💧 წყალი":
             locked = lock_gate(row.get("FG_Date"), f"edit_ovr_water_{bid}") if fg_done else False
-            water_day = brew_day_selector("water_day", disabled=locked)
+            water_day = brew_day
             profiles_df = get_df("WATER_PROFILES")
             profile_names = sorted(profiles_df["Profile_Name"].unique()) if not profiles_df.empty else []
             chosen_profile = st.selectbox("წყლის პროფილი (თუ შენახული გაქვს)",
                                            ["— ხელით შევსება —"] + profile_names, disabled=locked)
 
-            defaults = {"Mash": {"vol": None, "gyp": 0, "cacl2": 0, "lac": 0, "ph": 5.3},
+            defaults = {"Mash": {"vol": 0, "gyp": 0, "cacl2": 0, "lac": 0, "ph": 5.3},
                         "Sparge": {"vol": 1000, "gyp": 0, "cacl2": 0, "lac": 0, "ph": 5.7}}
             if chosen_profile != "— ხელით შევსება —":
                 for stream in ["Mash", "Sparge"]:
@@ -703,31 +824,40 @@ else:
                             "gyp": pr.get("Gypsum_g", 0), "cacl2": pr.get("CaCl2_g", 0),
                             "lac": pr.get("Lactic_ml", 0), "ph": pr.get("Target_pH", defaults[stream]["ph"]),
                         }
+            # per-day pre-fill: saved day-N values, else day-1 values, else profile
+            wd = water_defaults_for_day(bid, water_day, defaults)
 
-            st.markdown("**Mash წყალი** _(მოცულობა ყოველ ხარშვაზე იცვლება — შეავსე ხელით)_")
+            st.markdown(f"**Mash წყალი** — დღე {water_day}")
             m1, m2, m3, m4, m5 = st.columns(5)
-            m_vol = m1.number_input("მოცულობა (L)", min_value=0.0, key="m_vol", disabled=locked)
-            m_gyp = m2.number_input("Gypsum (g)", value=float(defaults["Mash"]["gyp"] or 0), key="m_gyp", disabled=locked)
-            m_cacl = m3.number_input("CaCl2 (g)", value=float(defaults["Mash"]["cacl2"] or 0), key="m_cacl", disabled=locked)
-            m_lac = m4.number_input("Lactic (ml)", value=float(defaults["Mash"]["lac"] or 0), key="m_lac", disabled=locked)
-            m_ph = m5.number_input("Target pH", value=float(defaults["Mash"]["ph"] or 5.3), key="m_ph", disabled=locked)
+            m_vol = m1.number_input("მოცულობა (L)", min_value=0.0, value=float(wd["Mash"]["vol"] or 0), key=f"m_vol_{water_day}", disabled=locked)
+            m_gyp = m2.number_input("Gypsum (g)", value=float(wd["Mash"]["gyp"] or 0), key=f"m_gyp_{water_day}", disabled=locked)
+            m_cacl = m3.number_input("CaCl2 (g)", value=float(wd["Mash"]["cacl2"] or 0), key=f"m_cacl_{water_day}", disabled=locked)
+            m_lac = m4.number_input("Lactic (ml)", value=float(wd["Mash"]["lac"] or 0), key=f"m_lac_{water_day}", disabled=locked)
+            m_ph = m5.number_input("Target pH", value=float(wd["Mash"]["ph"] or 5.3), key=f"m_ph_{water_day}", disabled=locked)
 
-            st.markdown("**Sparge წყალი**")
+            st.markdown(f"**Sparge წყალი** — დღე {water_day}")
             s1, s2, s3, s4, s5 = st.columns(5)
-            s_vol = s1.number_input("მოცულობა (L)", value=float(defaults["Sparge"]["vol"] or 1000), key="s_vol", disabled=locked)
-            s_gyp = s2.number_input("Gypsum (g)", value=float(defaults["Sparge"]["gyp"] or 0), key="s_gyp", disabled=locked)
-            s_cacl = s3.number_input("CaCl2 (g)", value=float(defaults["Sparge"]["cacl2"] or 0), key="s_cacl", disabled=locked)
-            s_lac = s4.number_input("Lactic (ml)", value=float(defaults["Sparge"]["lac"] or 0), key="s_lac", disabled=locked)
-            s_ph = s5.number_input("Target pH", value=float(defaults["Sparge"]["ph"] or 5.7), key="s_ph", disabled=locked)
+            s_vol = s1.number_input("მოცულობა (L)", value=float(wd["Sparge"]["vol"] or 1000), key=f"s_vol_{water_day}", disabled=locked)
+            s_gyp = s2.number_input("Gypsum (g)", value=float(wd["Sparge"]["gyp"] or 0), key=f"s_gyp_{water_day}", disabled=locked)
+            s_cacl = s3.number_input("CaCl2 (g)", value=float(wd["Sparge"]["cacl2"] or 0), key=f"s_cacl_{water_day}", disabled=locked)
+            s_lac = s4.number_input("Lactic (ml)", value=float(wd["Sparge"]["lac"] or 0), key=f"s_lac_{water_day}", disabled=locked)
+            s_ph = s5.number_input("Target pH", value=float(wd["Sparge"]["ph"] or 5.7), key=f"s_ph_{water_day}", disabled=locked)
 
-            if st.button("💾 წყლის მონაცემის შენახვა", disabled=locked):
+            if st.button(f"💾 წყლის მონაცემის შენახვა (დღე {water_day})", disabled=locked):
                 # salt auto-deduction: total need across Mash+Sparge, in grams.
                 # Only NEW saves deduct — existing WATER_TREATMENT rows are
                 # never touched retroactively.
+                # replace-on-save: this brew day's water is rewritten, not
+                # duplicated. Salts deduct only on the day's FIRST save (no
+                # prior rows) so editing + re-saving doesn't double-deduct.
+                wt_df = get_df("WATER_TREATMENT")
+                day_had_rows = (not wt_df.empty and "Brew_Day" in wt_df.columns
+                                and not wt_df[(wt_df["Brew_ID"] == bid)
+                                              & (wt_df["Brew_Day"].astype(str) == str(water_day))].empty)
                 need = {"Gypsum": m_gyp + s_gyp, "CaCl2": m_cacl + s_cacl}
                 blocked = False
                 deductions = {}  # salt -> (item_name, stock, deduct_in_inv_unit, inv_unit)
-                if not hist_mode:  # historical entries never validate/deduct stock
+                if not hist_mode and not day_had_rows:  # deduct once, on first save
                     inv_w_df = get_df("INVENTORY")
                     salt_rows = {
                         "Gypsum": find_inventory_item(inv_w_df, ["gypsum", "caso4"]),
@@ -755,6 +885,8 @@ else:
                         else:
                             deductions[salt] = (r["Item"], stock, deduct, inv_unit)
                 if not blocked:
+                    if day_had_rows:  # replace: drop this day's old rows first
+                        delete_day_rows("WATER_TREATMENT", bid, water_day)
                     append_row("WATER_TREATMENT", {"Brew_ID": bid, "Water_Stream": "Mash",
                         "Volume_L": m_vol, "Gypsum_g": m_gyp, "CaCl2_g": m_cacl,
                         "Lactic_ml": m_lac, "Target_pH": m_ph, "Brew_Day": water_day})
@@ -767,6 +899,8 @@ else:
                     msg = f"წყლის მონაცემი შენახულია (დღე {water_day})."
                     if hist_mode:
                         msg += " 📜 ისტორიული რეჟიმი — მარაგი უცვლელია."
+                    elif day_had_rows:
+                        msg += " (განახლდა — მარაგი ხელახლა არ შეხებია)."
                     elif deductions:
                         parts = ", ".join(f"{salt} {d:g}{u}"
                                           for salt, (_, _, d, u) in deductions.items())
@@ -794,29 +928,15 @@ else:
         if st.session_state.brew_tab == "🌾 მეშინგი":
             locked = lock_gate(row.get("FG_Date"), f"edit_ovr_mash_{bid}") if fg_done else False
             st.caption("[Certain] mash schedule ხარშვიდან ხარშვამდე იცვლება — ამიტომ ყოველთვის ხელით.")
-            st.markdown("**საფეხურები** _(შეავსე ის row-ები, რომლებიც გჭირდება — ცარიელი row-ები არ ჩაიწერება)_")
-            mash_template = pd.DataFrame({
-                "საფეხური #": [1, 2, 3, 4, 5],
-                "ტემპ (°C)": [0.0] * 5,
-                "ხანგრძლივობა (წთ)": [0] * 5,
-                "შენიშვნა": [""] * 5,
-            })
+            st.markdown(f"**საფეხურები — დღე {brew_day}** _(დღე 2 default-ად დღე 1-ის "
+                        f"საფეხურებით ივსება; შენახვა ცვლის ამ დღის საფეხურებს)_")
             mash_edit = st.data_editor(
-                mash_template, num_rows="fixed", use_container_width=True,
-                key="mash_steps_editor", disabled=locked,
+                mash_steps_df(bid, brew_day), num_rows="fixed", use_container_width=True,
+                key=f"mash_steps_editor_{brew_day}", disabled=locked,
             )
-            if st.button("💾 საფეხურების შენახვა", disabled=locked):
-                # Phase D.2: block duplicate temperatures — both against steps
-                # already in BREW_STEPS and within the 5-row batch itself.
-                existing_mash = get_df("BREW_STEPS")
-                existing_temps = {}  # temp(°C) -> step Item name already saved
-                if (not existing_mash.empty
-                        and {"Brew_ID", "Category", "Qty", "Item"} <= set(existing_mash.columns)):
-                    em = existing_mash[(existing_mash["Brew_ID"] == bid)
-                                       & (existing_mash["Category"] == "Mash_Step")]
-                    for _, er in em.iterrows():
-                        existing_temps[_num(er.get("Qty"))] = str(er.get("Item", ""))
-
+            if st.button(f"💾 საფეხურების შენახვა (დღე {brew_day})", disabled=locked):
+                # within-editor duplicate-temperature guard (day 1 and day 2 may
+                # share temps; the whole day is replaced on save)
                 to_save, batch_temps, dup_err = [], {}, None
                 for _, r in mash_edit.iterrows():
                     temp_v = r["ტემპ (°C)"]
@@ -825,10 +945,6 @@ else:
                         continue  # ცარიელი row — იგნორი
                     t = _num(temp_v)
                     step_no = int(r["საფეხური #"])
-                    if t in existing_temps:
-                        dup_err = (f"ეს ტემპერატურა ({t:g}°C) უკვე დამატებულია "
-                                   f"საფეხურ „{existing_temps[t]}“-ში.")
-                        break
                     if t in batch_temps:
                         dup_err = (f"ეს ტემპერატურა ({t:g}°C) გამეორებულია — "
                                    f"საფეხური {batch_temps[t]} და {step_no}.")
@@ -838,17 +954,17 @@ else:
 
                 if dup_err:
                     st.error(dup_err)
-                elif not to_save:
-                    st.success("შესავსები row ვერ მოიძებნა.")
                 else:
+                    delete_day_rows("BREW_STEPS", bid, brew_day, category="Mash_Step")
                     for step_no, temp_v, dur_v, note in to_save:
                         append_row("BREW_STEPS", {
                             "Brew_ID": bid, "Stage": "Mash", "Category": "Mash_Step",
                             "Item": f"საფეხური {step_no}",
                             "Qty": temp_v, "Unit": "°C",
                             "Timing": f"{int(dur_v)} წთ", "Justification": note,
+                            "Brew_Day": brew_day,
                         })
-                    st.success(f"{len(to_save)} საფეხური შენახულია.")
+                    st.success(f"დღე {brew_day}: {len(to_save)} საფეხური შენახულია.")
                     st.rerun()
 
             st.markdown("**ალაოს ჩამონათვალი (grain bill)**")
@@ -870,7 +986,8 @@ else:
                     st.error(f"ერთეულები შეუთავსებელია: ფორმაში kg, მარაგში "
                              f"'{malt_inv_unit}' — ჩამოჭრა ვერ გამოითვლება. "
                              f"გაასწორე ამ item-ის ერთეული INVENTORY-ში.")
-                c1, c2, c3 = st.columns([2, 1, 2])
+                malt_day = brew_day
+                c1, c3 = st.columns([2, 2])
                 malt_qty = c1.number_input(
                     f"რაოდენობა (kg) — მარაგში {malt_cap:g} kg" if malt_cap is not None
                     else "რაოდენობა (kg)",
@@ -878,8 +995,6 @@ else:
                     # historical entries may exceed today's stock — no cap then
                     max_value=malt_cap if (malt_cap and malt_cap > 0 and not hist_mode) else None,
                     key="malt_qty", disabled=locked)
-                with c2:
-                    malt_day = brew_day_selector("malt_day", disabled=locked)
                 malt_just = c3.text_input("დასაბუთება", key="malt_just", disabled=locked)
                 malt_deduct = convert_to_inventory_unit(malt_qty, "kg", malt_inv_unit)
                 # duplicate = same Brew_ID+Category+Item AND same brew day —
@@ -924,6 +1039,16 @@ else:
                         if not hist_mode:
                             update_cell_by_key("INVENTORY", "Item", malt_name,
                                                "Current_Qty", round(malt_stock - malt_deduct, 4))
+                        st.rerun()
+
+                if brew_day == 2 and not locked and st.button("📋 დღე 1-ის ალაო → დღე 2"):
+                    copied, skipped = copy_ingredients_day1_to_day2(bid, "Malt", "kg")
+                    if copied:
+                        st.success(f"დღე 2-ზე დაკოპირდა: {', '.join(copied)} "
+                                   "(მარაგიდან ჩამოიჭრა).")
+                    if skipped:
+                        st.warning(f"მარაგი არ ჰყოფნის, გამოტოვდა: {', '.join(skipped)}.")
+                    if copied:
                         st.rerun()
 
             steps_df = get_df("BREW_STEPS")
@@ -971,10 +1096,8 @@ else:
                                                key="hop_timing_custom", disabled=locked).strip()
                 else:
                     hop_timing = hop_timing_sel
-                hd1, hd2 = st.columns([1, 2])
-                with hd1:
-                    hop_day = brew_day_selector("hop_day", disabled=locked)
-                hop_just = hd2.text_input("დასაბუთება", key="hop_just", disabled=locked)
+                hop_day = brew_day
+                hop_just = st.text_input("დასაბუთება", key="hop_just", disabled=locked)
                 hop_deduct = convert_to_inventory_unit(hop_qty, "g", hop_inv_unit)
                 # true duplicate for hops = same Brew_ID+Category+Item AND Timing
                 # AND brew day. Same hop at another timing OR another day is a
@@ -1025,6 +1148,18 @@ else:
                                                "Current_Qty", round(hop_stock - hop_deduct, 4))
                         st.rerun()
 
+                if brew_day == 2 and not locked and st.button("📋 დღე 1-ის სვია → დღე 2"):
+                    copied, skipped = copy_ingredients_day1_to_day2(bid, "Hop", "g")
+                    if copied:
+                        st.success(f"დღე 2-ზე დაკოპირდა: {', '.join(copied)} "
+                                   "(მარაგიდან ჩამოიჭრა).")
+                    if skipped:
+                        st.warning(f"მარაგი არ ჰყოფნის, გამოტოვდა: {', '.join(skipped)}.")
+                    if copied:
+                        st.rerun()
+
+            st.divider()
+            st.caption("Pre/Post-Boil და Actual OG — ერთი საერთო მთელ ხარშვაზე (დღეზე არ იყოფა).")
             c1, c2 = st.columns(2)
             pre_boil_vol = c1.number_input("Pre-Boil მოცულობა (L)", disabled=locked)
             pre_boil_p = c2.number_input("Pre-Boil Gravity (°P)", disabled=locked)
