@@ -613,6 +613,17 @@ else:
         if fg_done:
             st.info("✅ FG მიღწეულია — ეს ხარშვა დახურულია. ცვლილება კვლავ შესაძლებელია, მაგრამ საჭირო აღარ არის.")
 
+        # ── single global brew-day switch in the top panel ──────────────
+        # one control drives ALL per-day data (წყალი/მეშინგი/ალაო/სვია).
+        # OG/Boil-header, საფუარი, gravity are shared across both days.
+        with st.container(border=True, key="brewday-panel"):
+            brew_day = st.radio(
+                "📅 ხარშვის დღე (თითო 800 L) — გადართე და ყველა ველი შესაბამის დღეზე გადავა",
+                [1, 2], horizontal=True, key="brew_day_global")
+            if brew_day == 2:
+                st.caption("დღე 2 — ველები default-ად დღე 1-ის მონაცემებით ივსება; "
+                           "შეასწორე რაც განსხვავდება. ალაო/სვიისთვის იხ. „დღე 1-ის კოპირება“ ღილაკი.")
+
         BREW_TABS = ["📊 მიმოხილვა", "💧 წყალი", "🌾 მეშინგი", "🔥 დუღილი (boil/hop)", "🧪 ფერმენტაცია/Gravity"]
         if "brew_tab" not in st.session_state:
             st.session_state.brew_tab = "📊 მიმოხილვა"
@@ -621,17 +632,6 @@ else:
             horizontal=True, label_visibility="collapsed", key="brew_tab_radio",
             index=BREW_TABS.index(st.session_state.brew_tab)
         )
-
-        # global brew-day selector — applies to the per-day tabs only
-        # (წყალი/მეშინგი/სვია). OG/Boil, საფუარი, gravity are day-independent.
-        PER_DAY_TABS = {"💧 წყალი", "🌾 მეშინგი", "🔥 დუღილი (boil/hop)"}
-        brew_day = 1
-        if st.session_state.brew_tab in PER_DAY_TABS:
-            brew_day = st.radio(
-                "ხარშვის დღე (თითო 800 L)", [1, 2], horizontal=True, key="brew_day_global")
-            if brew_day == 2:
-                st.caption("დღე 2 — ცარიელ ველებში default-ად დღე 1-ის მონაცემებია; "
-                           "შეცვალე რაც განსხვავდება. სვია/ალაოსთვის იხ. „დღე 1-ის კოპირება“ ღილაკი.")
 
         # ---- OVERVIEW TAB ----
         if st.session_state.brew_tab == "📊 მიმოხილვა":
