@@ -636,8 +636,11 @@ else:
                        + " · " + ("🔒 დღე 2 დახურულია" if d2_closed else "🔓 დღე 2 ღიაა"))
 
             this_day_closed = is_day_closed(row, brew_day)
+            # day 2 stays locked until day 1 is finished and closed — you can't
+            # start the second batch while the first one is still open
+            day2_blocked = (brew_day == 2 and not d1_closed)
             # closed day => everything per-day is locked until explicitly reopened
-            day_locked = this_day_closed
+            day_locked = this_day_closed or day2_blocked
             if this_day_closed:
                 st.warning(f"დღე {brew_day} დახურულია — შემთხვევითი ცვლილებისგან დაცულია. "
                            f"რედაქტირებისთვის მონიშნე ქვემოთ.")
@@ -648,6 +651,15 @@ else:
                         close_brew_day(bid, brew_day, closed=False)
                         st.success(f"დღე {brew_day} გაიხსნა.")
                         st.rerun()
+            elif day2_blocked:
+                st.warning("დღე 2 ჯერ დაბლოკილია — ჯერ დაასრულე და დახურე დღე 1.")
+                if st.button("🔒 დღე 1-ის დახურვა ახლავე", key=f"close_d1_from_d2_{bid}"):
+                    close_brew_day(bid, 1, closed=True)
+                    st.success("დღე 1 დაიხურა — დღე 2 გაიხსნა.")
+                    st.rerun()
+                if st.checkbox("🔓 მაინც მინდა დღე 2-ის შევსება (დღე 1-ის დახურვის გარეშე)",
+                               key=f"day2_override_{bid}"):
+                    day_locked = False
             else:
                 if brew_day == 2:
                     st.caption("დღე 2 — ველები default-ად დღე 1-ის მონაცემებით ივსება; "
