@@ -259,6 +259,16 @@ def lock_gate(fg_date, key):
                f"ცვლილება არ არის რეკომენდებული.")
     return not st.checkbox("მაინც მინდა რედაქტირება", key=key)
 
+def is_day_closed(row, day):
+    """True when this brew day was explicitly closed (Day{N}_Closed set)."""
+    return str(row.get(f"Day{int(day)}_Closed", "")).strip().lower() in ("1", "true", "yes", "დახურული")
+
+def close_brew_day(bid, day, closed=True):
+    """Mark a brew day closed/open in BREW_HEADER."""
+    update_cell_by_key("BREW_HEADER", "Brew_ID", bid, f"Day{int(day)}_Closed",
+                       "1" if closed else "")
+    get_df.clear()
+
 def delete_day_rows(sheet, bid, day, category=None):
     """Delete rows for Brew_ID + Brew_Day (optionally + Category) so a day's
     data can be replaced on re-save. Bottom-up delete; returns count."""
@@ -620,9 +630,36 @@ else:
             brew_day = st.radio(
                 "📅 ხარშვის დღე (თითო 800 L) — გადართე და ყველა ველი შესაბამის დღეზე გადავა",
                 [1, 2], horizontal=True, key="brew_day_global")
-            if brew_day == 2:
-                st.caption("დღე 2 — ველები default-ად დღე 1-ის მონაცემებით ივსება; "
-                           "შეასწორე რაც განსხვავდება. ალაო/სვიისთვის იხ. „დღე 1-ის კოპირება“ ღილაკი.")
+
+            d1_closed, d2_closed = is_day_closed(row, 1), is_day_closed(row, 2)
+            st.caption(("🔒 დღე 1 დახურულია" if d1_closed else "🔓 დღე 1 ღიაა")
+                       + " · " + ("🔒 დღე 2 დახურულია" if d2_closed else "🔓 დღე 2 ღიაა"))
+
+            this_day_closed = is_day_closed(row, brew_day)
+            # closed day => everything per-day is locked until explicitly reopened
+            day_locked = this_day_closed
+            if this_day_closed:
+                st.warning(f"დღე {brew_day} დახურულია — შემთხვევითი ცვლილებისგან დაცულია. "
+                           f"რედაქტირებისთვის მონიშნე ქვემოთ.")
+                if st.checkbox(f"🔓 მაინც მინდა დღე {brew_day}-ის რედაქტირება",
+                               key=f"day_override_{bid}_{brew_day}"):
+                    day_locked = False
+                    if st.button(f"დღე {brew_day}-ის საბოლოოდ გახსნა", key=f"reopen_{bid}_{brew_day}"):
+                        close_brew_day(bid, brew_day, closed=False)
+                        st.success(f"დღე {brew_day} გაიხსნა.")
+                        st.rerun()
+            else:
+                if brew_day == 2:
+                    st.caption("დღე 2 — ველები default-ად დღე 1-ის მონაცემებით ივსება; "
+                               "შეასწორე რაც განსხვავდება. ალაო/სვიისთვის იხ. „დღე 1-ის კოპირება“ ღილაკი.")
+                if st.button(f"🔒 დღე {brew_day}-ის დახურვა", key=f"close_{bid}_{brew_day}"):
+                    close_brew_day(bid, brew_day, closed=True)
+                    if brew_day == 1:  # jump straight to day 2 — the step that got forgotten
+                        st.session_state["brew_day_global"] = 2
+                        st.success("დღე 1 დაიხურა — გადაერთე დღე 2-ზე.")
+                    else:
+                        st.success("დღე 2 დაიხურა.")
+                    st.rerun()
 
         BREW_TABS = ["📊 მიმოხილვა", "💧 წყალი", "🌾 მეშინგი", "🔥 დუღილი (boil/hop)", "🧪 ფერმენტაცია/Gravity"]
         if "brew_tab" not in st.session_state:
@@ -804,7 +841,7 @@ else:
 
         # ---- WATER TAB ----
         if st.session_state.brew_tab == "💧 წყალი":
-            locked = lock_gate(row.get("FG_Date"), f"edit_ovr_water_{bid}") if fg_done else False
+            locked = (lock_gate(row.get("FG_Date"), f"edit_ovr_water_{bid}") if fg_done else False) or day_locked
             water_day = brew_day
             profiles_df = get_df("WATER_PROFILES")
             profile_names = sorted(profiles_df["Profile_Name"].unique()) if not profiles_df.empty else []
@@ -926,7 +963,7 @@ else:
 
         # ---- MASH TAB ----
         if st.session_state.brew_tab == "🌾 მეშინგი":
-            locked = lock_gate(row.get("FG_Date"), f"edit_ovr_mash_{bid}") if fg_done else False
+            locked = (lock_gate(row.get("FG_Date"), f"edit_ovr_mash_{bid}") if fg_done else False) or day_locked
             st.caption("[Certain] mash schedule ხარშვიდან ხარშვამდე იცვლება — ამიტომ ყოველთვის ხელით.")
             st.markdown(f"**საფეხურები — დღე {brew_day}** _(დღე 2 default-ად დღე 1-ის "
                         f"საფეხურებით ივსება; შენახვა ცვლის ამ დღის საფეხურებს)_")
@@ -1058,7 +1095,10 @@ else:
 
         # ---- BOIL / HOP TAB ----
         if st.session_state.brew_tab == "🔥 დუღილი (boil/hop)":
-            locked = lock_gate(row.get("FG_Date"), f"edit_ovr_boil_{bid}") if fg_done else False
+            # day lock covers the hop list (per-day); the boil header below is
+            # brew-level and stays governed by the FG lock only
+            fg_locked = lock_gate(row.get("FG_Date"), f"edit_ovr_boil_{bid}") if fg_done else False
+            locked = fg_locked or day_locked
             st.markdown("**ჰოპის დამატება**")
             st.caption("[Certain] დამატებისას რაოდენობა ავტომატურად ჩამოეჭრება "
                        "INVENTORY-ს (ერთეულის კონვერტაციით). AA% ივსება INVENTORY-დან.")
@@ -1161,12 +1201,12 @@ else:
             st.divider()
             st.caption("Pre/Post-Boil და Actual OG — ერთი საერთო მთელ ხარშვაზე (დღეზე არ იყოფა).")
             c1, c2 = st.columns(2)
-            pre_boil_vol = c1.number_input("Pre-Boil მოცულობა (L)", disabled=locked)
-            pre_boil_p = c2.number_input("Pre-Boil Gravity (°P)", disabled=locked)
+            pre_boil_vol = c1.number_input("Pre-Boil მოცულობა (L)", disabled=fg_locked)
+            pre_boil_p = c2.number_input("Pre-Boil Gravity (°P)", disabled=fg_locked)
             c3, c4 = st.columns(2)
-            post_boil_vol = c3.number_input("Post-Boil მოცულობა (L)", disabled=locked)
-            actual_og = c4.number_input("Actual OG (°P)", disabled=locked)
-            if st.button("💾 boil მონაცემის შენახვა header-ში", disabled=locked):
+            post_boil_vol = c3.number_input("Post-Boil მოცულობა (L)", disabled=fg_locked)
+            actual_og = c4.number_input("Actual OG (°P)", disabled=fg_locked)
+            if st.button("💾 boil მონაცემის შენახვა header-ში", disabled=fg_locked):
                 for col, val in [("Pre_Boil_Vol_L", pre_boil_vol), ("Pre_Boil_P", pre_boil_p),
                                   ("Post_Boil_Vol_L", post_boil_vol), ("Actual_OG_P", actual_og)]:
                     update_cell_by_key("BREW_HEADER", "Brew_ID", bid, col, val)
