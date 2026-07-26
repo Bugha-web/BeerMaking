@@ -180,10 +180,46 @@ def update_cell_by_key(name, key_col, key_val, target_col, value):
 SHEET_HEADERS = {
     "WATER_PROFILES": ["Profile_Name", "Stream", "Volume_L_Default", "Gypsum_g",
                         "CaCl2_g", "Lactic_ml", "Target_pH", "Notes"],
+    "CHANGE_LOG": ["Timestamp", "Operator", "Brew_ID", "Brew_Name", "Brew_Day",
+                   "Action", "Details"],
 }
+
+def log_change(action, details="", bid="", brew_name="", day=""):
+    """Append an audit-trail row to CHANGE_LOG. Deliberately does NOT clear
+    the get_df cache — the log is never read in the UI hot path, and clearing
+    would force every other sheet to refetch on each save."""
+    try:
+        w = ws("CHANGE_LOG")
+        w.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                      st.session_state.get("operator", ""), str(bid), str(brew_name),
+                      str(day), str(action), str(details)],
+                     value_input_option="USER_ENTERED")
+    except Exception as e:  # logging must never block the actual save
+        st.caption(f"⚠️ ჟურნალში ჩაწერა ვერ მოხერხდა: {type(e).__name__}")
 
 def new_id(prefix):
     return f"{prefix}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
+
+# plausibility limits for one 800 L brew day — implausible values are almost
+# always typos (wrong unit, extra digit, wrong field)
+SANITY = {
+    "vol_target": 800.0, "vol_tolerance": 0.30,   # ±30% of the day's volume
+    "sparge_max": 2000.0, "grain_max_kg": 300.0, "grain_min_kg": 50.0,
+    "hop_max_g": 3000.0, "salt_max_g": 1000.0, "lactic_max_ml": 2000.0,
+    "mash_temp_min": 30.0, "mash_temp_max": 85.0, "mash_dur_max": 180,
+    "og_max_p": 30.0, "ph_min": 4.0, "ph_max": 7.0,
+}
+
+def sanity_gate(checks, key):
+    """checks = list of (is_suspicious, message). Renders warnings and requires
+    an explicit confirm checkbox before allowing the save. Returns True when it
+    is safe to proceed (nothing suspicious, or the user confirmed)."""
+    hits = [msg for bad, msg in checks if bad]
+    if not hits:
+        return True
+    for msg in hits:
+        st.warning(f"⚠️ {msg}")
+    return st.checkbox("დიახ, მონაცემი სწორია — შენახვა", key=key)
 
 def _num(v, default=0.0):
     """Coerce a sheet cell (str like '1000' or '5.40%', int, or blank) to float."""
@@ -495,6 +531,10 @@ if st.session_state.historical_mode:
                        "ხარშვების შეყვანას დაასრულებ.")
 hist_mode = st.session_state.historical_mode
 
+# who is entering data — recorded in CHANGE_LOG (the app has no login)
+st.sidebar.text_input("👤 ვინ ავსებს (ჟურნალისთვის)", key="operator",
+                      placeholder="სახელი")
+
 # ============================================================
 # PAGE 1 — INVENTORY
 # ============================================================
@@ -523,6 +563,7 @@ if page == "📦 Inventory":
             w.clear()
             w.update(values)
             get_df.clear()
+            log_change("მარაგის ცხრილი შესწორდა", f"{len(full)} row გადაიწერა")
             st.success("შენახულია.")
             st.rerun()
 
@@ -560,6 +601,7 @@ if page == "📦 Inventory":
             if st.button("წაშლა", key="inv_del_btn") and confirm:
                 n = delete_rows_where("INVENTORY", "Item", item_to_delete)
                 get_df.clear()
+                log_change("🗑️ ნედლეული წაიშალა", f"{item_to_delete} ({n} row)")
                 st.success(f"წაშლილია ({n} row).")
                 st.rerun()
 
@@ -649,12 +691,16 @@ else:
                     day_locked = False
                     if st.button(f"დღე {brew_day}-ის საბოლოოდ გახსნა", key=f"reopen_{bid}_{brew_day}"):
                         close_brew_day(bid, brew_day, closed=False)
+                        log_change("დღე გაიხსნა", f"დღე {brew_day}", bid=bid,
+                                   brew_name=choice, day=brew_day)
                         st.success(f"დღე {brew_day} გაიხსნა.")
                         st.rerun()
             elif day2_blocked:
                 st.warning("დღე 2 ჯერ დაბლოკილია — ჯერ დაასრულე და დახურე დღე 1.")
                 if st.button("🔒 დღე 1-ის დახურვა ახლავე", key=f"close_d1_from_d2_{bid}"):
                     close_brew_day(bid, 1, closed=True)
+                    log_change("დღე დაიხურა", "დღე 1 (დღე 2-ზე გადასვლისას)",
+                               bid=bid, brew_name=choice, day=1)
                     st.success("დღე 1 დაიხურა — დღე 2 გაიხსნა.")
                     st.rerun()
                 if st.checkbox("🔓 მაინც მინდა დღე 2-ის შევსება (დღე 1-ის დახურვის გარეშე)",
@@ -666,6 +712,8 @@ else:
                                "შეასწორე რაც განსხვავდება. ალაო/სვიისთვის იხ. „დღე 1-ის კოპირება“ ღილაკი.")
                 if st.button(f"🔒 დღე {brew_day}-ის დახურვა", key=f"close_{bid}_{brew_day}"):
                     close_brew_day(bid, brew_day, closed=True)
+                    log_change("დღე დაიხურა", f"დღე {brew_day}", bid=bid,
+                               brew_name=choice, day=brew_day)
                     if brew_day == 1:  # jump straight to day 2 — the step that got forgotten
                         st.session_state["brew_day_global"] = 2
                         st.success("დღე 1 დაიხურა — გადაერთე დღე 2-ზე.")
@@ -830,6 +878,21 @@ else:
                     st.markdown("#### 📝 შედეგის შენიშვნა")
                     st.write(_show(row.get("Outcome_Note")))
 
+            # --- change log for this brew ---
+            with st.expander("🧾 ცვლილებების ჟურნალი"):
+                log_df = get_df("CHANGE_LOG")
+                if log_df.empty or "Brew_ID" not in log_df.columns:
+                    st.caption("ჟურნალი ჯერ ცარიელია.")
+                else:
+                    mine = log_df[log_df["Brew_ID"] == bid]
+                    if mine.empty:
+                        st.caption("ამ ხარშვაზე ჩანაწერი ჯერ არ არის.")
+                    else:
+                        lcols = [c for c in ["Timestamp", "Operator", "Brew_Day", "Action", "Details"]
+                                 if c in mine.columns]
+                        st.dataframe(mine[lcols].iloc[::-1], use_container_width=True,
+                                     hide_index=True)
+
             # --- delete brew (cascade, double confirmation) ---
             with st.expander("🗑️ ხარშვის წაშლა"):
                 st.warning("ეს წაშლის ამ ხარშვას ყველა Sheet-იდან — Header, Steps, "
@@ -847,6 +910,9 @@ else:
                                       "BREW_GRAVITY_LOG", "BREW_HEADER"]:
                             deleted[sheet] = delete_rows_where(sheet, "Brew_ID", bid)
                         get_df.clear()
+                        log_change("🗑️ ხარშვა წაიშალა",
+                                   ", ".join(f"{s} −{n}" for s, n in deleted.items()),
+                                   bid=bid, brew_name=brew_display)
                         st.success("წაშლილია: " + ", ".join(
                             f"{s} −{n}" for s, n in deleted.items()))
                         st.rerun()
@@ -892,7 +958,26 @@ else:
             s_lac = s4.number_input("Lactic (ml)", value=float(wd["Sparge"]["lac"] or 0), key=f"s_lac_{water_day}", disabled=locked)
             s_ph = s5.number_input("Target pH", value=float(wd["Sparge"]["ph"] or 5.7), key=f"s_ph_{water_day}", disabled=locked)
 
-            if st.button(f"💾 წყლის მონაცემის შენახვა (დღე {water_day})", disabled=locked):
+            tgt = _num(row.get("Target_Vol_L"), SANITY["vol_target"]) or SANITY["vol_target"]
+            lo, hi = tgt * (1 - SANITY["vol_tolerance"]), tgt * (1 + SANITY["vol_tolerance"])
+            water_ok = sanity_gate([
+                (m_vol and not (lo <= m_vol <= hi),
+                 f"Mash მოცულობა {m_vol:g} L — სამიზნეს ({tgt:g} L) 30%-ზე მეტით სცდება."),
+                (s_vol > SANITY["sparge_max"],
+                 f"Sparge მოცულობა {s_vol:g} L — ჩვეულებრივზე ბევრად მეტია."),
+                (m_gyp + s_gyp > SANITY["salt_max_g"],
+                 f"Gypsum სულ {m_gyp + s_gyp:g} g — ჩვეულებრივზე ბევრად მეტია."),
+                (m_cacl + s_cacl > SANITY["salt_max_g"],
+                 f"CaCl₂ სულ {m_cacl + s_cacl:g} g — ჩვეულებრივზე ბევრად მეტია."),
+                (m_lac + s_lac > SANITY["lactic_max_ml"],
+                 f"Lactic სულ {m_lac + s_lac:g} ml — ჩვეულებრივზე ბევრად მეტია."),
+                (m_ph and not (SANITY["ph_min"] <= m_ph <= SANITY["ph_max"]),
+                 f"Mash pH {m_ph:g} — რეალურ დიაპაზონს ({SANITY['ph_min']}–{SANITY['ph_max']}) სცდება."),
+                (s_ph and not (SANITY["ph_min"] <= s_ph <= SANITY["ph_max"]),
+                 f"Sparge pH {s_ph:g} — რეალურ დიაპაზონს სცდება."),
+            ], key=f"sanity_water_{bid}_{water_day}")
+            if st.button(f"💾 წყლის მონაცემის შენახვა (დღე {water_day})",
+                         disabled=locked or not water_ok):
                 # salt auto-deduction: total need across Mash+Sparge, in grams.
                 # Only NEW saves deduct — existing WATER_TREATMENT rows are
                 # never touched retroactively.
@@ -945,6 +1030,11 @@ else:
                     for salt, (item, stock, deduct, inv_unit) in deductions.items():
                         update_cell_by_key("INVENTORY", "Item", item,
                                            "Current_Qty", round(stock - deduct, 4))
+                    log_change("წყალი შენახვა",
+                               f"Mash {m_vol:g}L/{m_gyp:g}g gyp/{m_cacl:g}g cacl2/{m_lac:g}ml/pH{m_ph:g}; "
+                               f"Sparge {s_vol:g}L/{s_gyp:g}g gyp/{s_cacl:g}g cacl2/{s_lac:g}ml/pH{s_ph:g}"
+                               + (" [replace]" if day_had_rows else ""),
+                               bid=bid, brew_name=choice, day=water_day)
                     msg = f"წყლის მონაცემი შენახულია (დღე {water_day})."
                     if hist_mode:
                         msg += " 📜 ისტორიული რეჟიმი — მარაგი უცვლელია."
@@ -983,7 +1073,18 @@ else:
                 mash_steps_df(bid, brew_day), num_rows="fixed", use_container_width=True,
                 key=f"mash_steps_editor_{brew_day}", disabled=locked,
             )
-            if st.button(f"💾 საფეხურების შენახვა (დღე {brew_day})", disabled=locked):
+            _mt = [_num(v) for v in mash_edit["ტემპ (°C)"] if _num(v)]
+            _md = [_num(v) for v in mash_edit["ხანგრძლივობა (წთ)"] if _num(v)]
+            mash_ok = sanity_gate([
+                (any(not (SANITY["mash_temp_min"] <= t <= SANITY["mash_temp_max"]) for t in _mt),
+                 f"ტემპერატურა დიაპაზონს ({SANITY['mash_temp_min']:g}–{SANITY['mash_temp_max']:g}°C) "
+                 f"სცდება: {', '.join(f'{t:g}' for t in _mt if not (SANITY['mash_temp_min'] <= t <= SANITY['mash_temp_max']))}°C"),
+                (any(d > SANITY["mash_dur_max"] for d in _md),
+                 f"ხანგრძლივობა {SANITY['mash_dur_max']} წთ-ზე მეტია: "
+                 f"{', '.join(f'{d:g}' for d in _md if d > SANITY['mash_dur_max'])} წთ"),
+            ], key=f"sanity_mash_{bid}_{brew_day}")
+            if st.button(f"💾 საფეხურების შენახვა (დღე {brew_day})",
+                         disabled=locked or not mash_ok):
                 # within-editor duplicate-temperature guard (day 1 and day 2 may
                 # share temps; the whole day is replaced on save)
                 to_save, batch_temps, dup_err = [], {}, None
@@ -1013,6 +1114,10 @@ else:
                             "Timing": f"{int(dur_v)} წთ", "Justification": note,
                             "Brew_Day": brew_day,
                         })
+                    log_change("მეშინგის საფეხურები",
+                               "; ".join(f"{_num(t):g}°C/{int(_num(d))}წთ" for _, t, d, _n in to_save)
+                               or "(ცარიელი)",
+                               bid=bid, brew_name=choice, day=brew_day)
                     st.success(f"დღე {brew_day}: {len(to_save)} საფეხური შენახულია.")
                     st.rerun()
 
@@ -1067,7 +1172,12 @@ else:
                     else:
                         st.caption(f"დღე {malt_day} · მარაგიდან ჩამოეჭრება: "
                                    f"{malt_deduct:g} {malt_inv_unit}")
-                if st.button("დამატება (ალაო)", disabled=locked) and malt_qty > 0:
+                malt_ok = sanity_gate([
+                    (malt_qty > SANITY["grain_max_kg"],
+                     f"ალაო {malt_qty:g} kg — ერთ დღეზე {SANITY['grain_max_kg']:g} kg-ზე მეტია. "
+                     f"შესაძლოა ერთეული აგერიოს (g ↔ kg)?"),
+                ], key=f"sanity_malt_{bid}_{brew_day}")
+                if st.button("დამატება (ალაო)", disabled=locked or not malt_ok) and malt_qty > 0:
                     if not hist_mode and malt_deduct is None:
                         st.error("ერთეულები შეუთავსებელია — ჩანაწერი არ შენახულა, "
                                  "ჩამოჭრა არ მომხდარა.")
@@ -1088,6 +1198,10 @@ else:
                         if not hist_mode:
                             update_cell_by_key("INVENTORY", "Item", malt_name,
                                                "Current_Qty", round(malt_stock - malt_deduct, 4))
+                        log_change("ალაო დამატება",
+                                   f"{malt_name} +{malt_qty:g} kg"
+                                   + ("" if hist_mode else f" (მარაგი −{malt_deduct:g} {malt_inv_unit})"),
+                                   bid=bid, brew_name=choice, day=malt_day)
                         st.rerun()
 
                 if brew_day == 2 and not locked and st.button("📋 დღე 1-ის ალაო → დღე 2"):
@@ -1174,7 +1288,12 @@ else:
                     else:
                         st.caption(f"დღე {hop_day} · მარაგიდან ჩამოეჭრება: "
                                    f"{hop_deduct:g} {hop_inv_unit}")
-                if st.button("დამატება (ჰოპი)", disabled=locked) and hop_qty > 0:
+                hop_ok = sanity_gate([
+                    (hop_qty > SANITY["hop_max_g"],
+                     f"სვია {hop_qty:g} g — ერთ დამატებაზე {SANITY['hop_max_g']:g} g-ზე მეტია. "
+                     f"შესაძლოა ერთეული აგერიოს (g ↔ kg)?"),
+                ], key=f"sanity_hop_{bid}_{brew_day}")
+                if st.button("დამატება (ჰოპი)", disabled=locked or not hop_ok) and hop_qty > 0:
                     if not str(hop_timing).strip():
                         st.error("შეავსე Timing (ხელით არჩეულ „სხვა“-ზე ცარიელია).")
                     elif not hist_mode and hop_deduct is None:
@@ -1198,6 +1317,10 @@ else:
                         if not hist_mode:
                             update_cell_by_key("INVENTORY", "Item", hop_name,
                                                "Current_Qty", round(hop_stock - hop_deduct, 4))
+                        log_change("სვია დამატება",
+                                   f"{hop_name} +{hop_qty:g} g @ {hop_timing}"
+                                   + ("" if hist_mode else f" (მარაგი −{hop_deduct:g} {hop_inv_unit})"),
+                                   bid=bid, brew_name=choice, day=hop_day)
                         st.rerun()
 
                 if brew_day == 2 and not locked and st.button("📋 დღე 1-ის სვია → დღე 2"):
@@ -1218,7 +1341,17 @@ else:
             c3, c4 = st.columns(2)
             post_boil_vol = c3.number_input("Post-Boil მოცულობა (L)", disabled=fg_locked)
             actual_og = c4.number_input("Actual OG (°P)", disabled=fg_locked)
-            if st.button("💾 boil მონაცემის შენახვა header-ში", disabled=fg_locked):
+            boil_ok = sanity_gate([
+                (actual_og > SANITY["og_max_p"],
+                 f"Actual OG {actual_og:g}°P — რეალურ დიაპაზონს ({SANITY['og_max_p']:g}°P) სცდება."),
+                (pre_boil_p > SANITY["og_max_p"],
+                 f"Pre-Boil {pre_boil_p:g}°P — რეალურ დიაპაზონს სცდება."),
+                (post_boil_vol and pre_boil_vol and post_boil_vol > pre_boil_vol,
+                 f"Post-Boil ({post_boil_vol:g} L) Pre-Boil-ზე ({pre_boil_vol:g} L) მეტია — "
+                 f"დუღილისას მოცულობა უნდა შემცირდეს."),
+            ], key=f"sanity_boil_{bid}")
+            if st.button("💾 boil მონაცემის შენახვა header-ში",
+                         disabled=fg_locked or not boil_ok):
                 for col, val in [("Pre_Boil_Vol_L", pre_boil_vol), ("Pre_Boil_P", pre_boil_p),
                                   ("Post_Boil_Vol_L", post_boil_vol), ("Actual_OG_P", actual_og)]:
                     update_cell_by_key("BREW_HEADER", "Brew_ID", bid, col, val)
@@ -1230,6 +1363,10 @@ else:
                     recalc_header_metrics(bid, actual_og, row.get("Actual_FG_P"),
                                           post_boil_vol, total_grain_kg(bid),
                                           fg_confirmed=True)
+                log_change("boil header",
+                           f"PreBoil {pre_boil_vol:g}L/{pre_boil_p:g}°P, "
+                           f"PostBoil {post_boil_vol:g}L, OG {actual_og:g}°P",
+                           bid=bid, brew_name=choice)
                 st.success("შენახულია.")
                 st.rerun()
 
@@ -1276,6 +1413,9 @@ else:
                 update_cell_by_key("BREW_HEADER", "Brew_ID", bid, "Yeast_Form", form_val)
                 update_cell_by_key("BREW_HEADER", "Brew_ID", bid, "Yeast_Generation",
                                    int(yeast_gen) if is_slurry else "")
+                log_change("საფუარი", f"{yeast_name} · {form_val}"
+                           + (f" · თაობა {int(yeast_gen)}" if is_slurry else ""),
+                           bid=bid, brew_name=choice)
                 st.success(f"საფუარი შენახულია: {yeast_name} ({form_val}"
                            + (f", თაობა {int(yeast_gen)}" if is_slurry else "") + ").")
                 st.rerun()
@@ -1306,8 +1446,15 @@ else:
                 g_temp = c2.number_input("ტემპერატურა (°C)", value=10.0, disabled=locked)
                 is_final = st.checkbox("ეს არის საბოლოო (FG) გაზომვა", disabled=locked)
                 add_g = st.form_submit_button("დამატება", disabled=locked)
+                og_now = _num(row.get("Actual_OG_P"))
                 if add_g and date_error:
                     st.error("თარიღი ხარშვის დაწყებამდეა — ჩანაწერი არ დაემატა.")
+                elif add_g and g_raw > SANITY["og_max_p"]:
+                    st.error(f"Gravity {g_raw:g}°P — რეალურ დიაპაზონს "
+                             f"({SANITY['og_max_p']:g}°P) სცდება. ჩანაწერი არ დაემატა.")
+                elif add_g and og_now and g_raw > og_now:
+                    st.error(f"Gravity {g_raw:g}°P OG-ზე ({og_now:g}°P) მეტია — "
+                             f"ფერმენტაციისას gravity უნდა ეცემოდეს. ჩანაწერი არ დაემატა.")
                 elif add_g:
                     ref_temp = _num(get_setting("Hydrometer_Ref_Temp_C", 20), 20)
                     corrected = correct_gravity_plato(g_raw, g_temp, ref_temp)
@@ -1329,6 +1476,10 @@ else:
                         extra = " | ".join(f"{k} {v}" for k, v in metrics.items())
                         st.success("FG დაფიქსირდა — ხარშვა დახურულია."
                                    + (f" ({extra})" if extra else ""))
+                    log_change("FG დაფიქსირდა" if is_final else "Gravity ჩანაწერი",
+                               f"day {day_number}: raw {g_raw:g}°P @ {g_temp:g}°C"
+                               + (f" → corrected {corrected:g}°P" if corrected is not None else ""),
+                               bid=bid, brew_name=choice)
                     st.rerun()
 
             grav_df = get_df("BREW_GRAVITY_LOG")
