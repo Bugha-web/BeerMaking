@@ -4,6 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date
 import uuid
+import re
 
 st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
@@ -183,6 +184,47 @@ SHEET_HEADERS = {
     "CHANGE_LOG": ["Timestamp", "Operator", "Brew_ID", "Brew_Name", "Brew_Day",
                    "Action", "Details"],
 }
+
+BREW_NUM_RE = re.compile(r"^ხარშვა\s+(\d+)\s*—\s*(.*)$")
+
+def parse_brew_number(display_name):
+    """Extract N from 'ხარშვა N — Style'. Returns None if it doesn't match."""
+    m = BREW_NUM_RE.match(str(display_name).strip())
+    return int(m.group(1)) if m else None
+
+def next_brew_number(headers_df):
+    """Highest existing brew number + 1 (survives deletions, unlike a row count)."""
+    if headers_df.empty or "Display_Name" not in headers_df.columns:
+        return 1
+    nums = [parse_brew_number(d) for d in headers_df["Display_Name"]]
+    nums = [n for n in nums if n]
+    return max(nums) + 1 if nums else 1
+
+def shift_brew_numbers_from(n):
+    """Renumber every brew with number >= n up by one, freeing slot n so a
+    forgotten brew can be inserted in the middle. Returns rows changed."""
+    w = ws("BREW_HEADER")
+    values = w.get_all_values()
+    if not values:
+        return 0
+    hdr = values[0]
+    try:
+        di = hdr.index("Display_Name")
+    except ValueError:
+        return 0
+    updates = []
+    for ridx, rowv in enumerate(values[1:], start=2):
+        if len(rowv) <= di:
+            continue
+        m = BREW_NUM_RE.match(str(rowv[di]).strip())
+        if m and int(m.group(1)) >= n:
+            updates.append((ridx, f"ხარშვა {int(m.group(1)) + 1} — {m.group(2)}"))
+    # descending so the highest numbers move first — no transient collisions
+    for ridx, newname in sorted(updates, reverse=True):
+        w.update_cell(ridx, di + 1, newname)
+    if updates:
+        get_df.clear()
+    return len(updates)
 
 def log_change(action, details="", bid="", brew_name="", day=""):
     """Append an audit-trail row to CHANGE_LOG. Deliberately does NOT clear
@@ -627,6 +669,18 @@ else:
     # ---------- NEW BREW ----------
     if choice == "➕ ახალი ხარშვა":
         st.subheader("ახალი ხარშვის დაწყება")
+        # number lives OUTSIDE the form so the insert notice updates live
+        # (form widgets don't rerun until submit)
+        next_no = next_brew_number(headers_df)
+        brew_no = st.number_input(
+            "ხარშვის ნომერი", min_value=1, value=next_no, step=1, key="new_brew_no",
+            help="დატოვე როგორც არის ბოლოში დასამატებლად. თუ დაკავებულ ნომერს "
+                 "აირჩევ (გამორჩენილი ხარშვის ჩასამატებლად), ის და ყველა "
+                 "მომდევნო ხარშვა ავტომატურად ერთით გადაინომრება.")
+        if brew_no < next_no:
+            st.info(f"↩️ ჩასმა პოზიცია {int(brew_no)}-ზე: ამჟამინდელი „ხარშვა {int(brew_no)}“ "
+                    f"და ყველა მომდევნო ერთით გადაინომრება "
+                    f"(→ {int(brew_no) + 1}, {int(brew_no) + 2}, …).")
         with st.form("new_brew"):
             c1, c2, c3 = st.columns(3)
             b_date = c1.date_input("თარიღი", value=date.today())
@@ -638,20 +692,26 @@ else:
             c6, c7 = st.columns(2)
             target_og = c6.number_input("Target OG (°P)", min_value=0.0, step=0.1)
             target_fg = c7.number_input("Target FG (°P)", min_value=0.0, step=0.1)
+
             start = st.form_submit_button("ხარშვის დაწყება")
             if start and style:
                 bid = new_id("BREW")
-                # +2 offset: brews 1 & 2 were lost, so numbering starts higher
-                # to stay consistent with the renumbered existing brews
-                display_name = f"ხარშვა {len(headers_df) + 1 + 2} — {style}"
+                shifted = 0
+                if brew_no < next_no:  # inserting into the middle — free the slot
+                    shifted = shift_brew_numbers_from(int(brew_no))
+                display_name = f"ხარშვა {int(brew_no)} — {style}"
                 append_row("BREW_HEADER", {
                     "Brew_ID": bid, "Date": str(b_date), "Beer_Style": style,
                     "Fermenter": ferm, "Target_Vol_L": target_vol, "Water_uS": water_us,
                     "Target_OG_P": target_og, "Target_FG_P": target_fg,
                     "Display_Name": display_name,
                 })
-                st.success(f"ხარშვა შეიქმნა: {display_name} ({bid}). "
-                           f"აირჩიე ის ზემოთა სიიდან რომ დეტალები შეავსო.")
+                log_change("ხარშვა შეიქმნა",
+                           f"{display_name}" + (f" (ჩასმა — {shifted} ხარშვა გადაინომრა)" if shifted else ""),
+                           bid=bid, brew_name=display_name)
+                st.success(f"ხარშვა შეიქმნა: {display_name} ({bid})."
+                           + (f" {shifted} ხარშვა გადაინომრა." if shifted else "")
+                           + " აირჩიე ის ზემოთა სიიდან რომ დეტალები შეავსო.")
                 st.rerun()
 
     # ---------- EXISTING BREW: TABS ----------
