@@ -3,6 +3,7 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, date
+from pathlib import Path
 import uuid
 import re
 
@@ -15,104 +16,17 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 # public test hooks) and .st-key-* (from widget key=), NOT version-specific
 # emotion hashes.
 # ============================================================
-st.markdown("""
-<style>
-/* card polish: subtle warm fill on overview cards (keyed = version-stable) */
-[class*="st-key-ovcard-"] {
-    background: rgba(224, 162, 60, 0.04);
-}
-/* emphasized numbers (OG/FG/Eff/ABV) — big, beer-amber */
-[data-testid="stMetricValue"] {
-    font-size: 1.9rem;
-    font-weight: 700;
-    color: #E9A93C;
-}
-[data-testid="stMetricLabel"] p {
-    font-size: 0.78rem;
-    letter-spacing: 0.04em;
-    opacity: 0.72;
-}
-/* brew page: horizontal radio styled as tabs (moved here from inline
-   so it loads once, not on every brew-page render) */
-.st-key-brew_tab_radio div[role="radiogroup"] { gap: 4px; }
-.st-key-brew_tab_radio div[role="radiogroup"] label {
-    border: 1px solid rgba(224, 162, 60, 0.30);
-    border-bottom: none;
-    border-radius: 10px 10px 0 0;
-    padding: 6px 16px;
-    background: rgba(255, 255, 255, 0.02);
-}
-.st-key-brew_tab_radio div[role="radiogroup"] label:has(input:checked) {
-    background: rgba(224, 162, 60, 0.16);
-    border-color: rgba(224, 162, 60, 0.6);
-}
-.st-key-brew_tab_radio div[role="radiogroup"] label > div:first-child { display: none; }
-/* sidebar nav: highlight the selected page */
-.st-key-nav_radio div[role="radiogroup"] label {
-    padding: 6px 10px;
-    border-radius: 8px;
-    margin-bottom: 2px;
-}
-.st-key-nav_radio div[role="radiogroup"] label:has(input:checked) {
-    background: rgba(224, 162, 60, 0.15);
-    box-shadow: inset 3px 0 0 #E0A23C;
-}
+@st.cache_data
+def _load_css():
+    # Read the stylesheet from disk. Kept OUT of this file on purpose: a long
+    # triple-quoted string here makes inspect.getsource() slices explode with
+    # TokenError on Python 3.11 (Streamlit Cloud) when line numbers shift.
+    f = Path(__file__).parent / "assets" / "style.css"
+    return f.read_text(encoding="utf-8") if f.exists() else ""
 
-/* ---------- mobile / touch ---------- */
-/* touch-friendly targets everywhere (Apple HIG minimum 44px) */
-.stButton button, .stFormSubmitButton button, .stDownloadButton button {
-    min-height: 44px;
-}
-[data-testid="stNumberInput"] input,
-[data-testid="stTextInput"] input,
-[data-testid="stDateInput"] input,
-[data-baseweb="select"] > div {
-    min-height: 44px;
-}
-[data-testid="stNumberInput"] button { min-width: 40px; }  /* +/- steppers */
-/* widget labels: wrap instead of truncate on narrow screens */
-[data-testid="stWidgetLabel"] p {
-    white-space: normal;
-    overflow-wrap: anywhere;
-}
-/* sidebar toggle (hamburger when collapsed): bigger, amber, obvious.
-   stExpandSidebarButton = 1.59 testid; stSidebarCollapsedControl = older */
-button[data-testid="stExpandSidebarButton"],
-[data-testid="stSidebarCollapsedControl"] {
-    background: rgba(224, 162, 60, 0.15) !important;
-    border: 1px solid rgba(224, 162, 60, 0.5) !important;
-    border-radius: 10px;
-    min-height: 44px;
-    min-width: 44px;
-}
-button[data-testid="stExpandSidebarButton"] *,
-[data-testid="stSidebarCollapsedControl"] * { color: #E0A23C !important; }
-
-@media (max-width: 640px) {
-    /* primary action buttons stretch to full width on phones.
-       the wrapper divs are fit-content, so widen the whole chain */
-    [data-testid="stElementContainer"]:has([data-testid="stButton"]),
-    [data-testid="stElementContainer"]:has([data-testid="stFormSubmitButton"]) { width: 100%; }
-    .stButton, .stFormSubmitButton { width: 100%; }
-    .stButton button, .stFormSubmitButton button { width: 100%; }
-    /* brew tab bar: single row, horizontally swipeable */
-    .st-key-brew_tab_radio div[role="radiogroup"] {
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
-        padding-bottom: 2px;
-    }
-    .st-key-brew_tab_radio div[role="radiogroup"]::-webkit-scrollbar { display: none; }
-    .st-key-brew_tab_radio div[role="radiogroup"] label {
-        flex: 0 0 auto;
-        white-space: nowrap;
-    }
-    /* slightly tighter page padding on phones */
-    [data-testid="stMainBlockContainer"] { padding-left: 1rem; padding-right: 1rem; }
-}
-</style>
-""", unsafe_allow_html=True)
+_css = _load_css()
+if _css:
+    st.html("<style>" + _css + "</style>")
 
 # ============================================================
 # CONNECTION — reads credentials + sheet id from Streamlit secrets
@@ -201,8 +115,8 @@ def next_brew_number(headers_df):
     return max(nums) + 1 if nums else 1
 
 def shift_brew_numbers_from(n):
-    """Renumber every brew with number >= n up by one, freeing slot n so a
-    forgotten brew can be inserted in the middle. Returns rows changed."""
+    # Renumber every brew with number >= n up by one, freeing slot n so a
+    # forgotten brew can be inserted in the middle. Returns rows changed.
     w = ws("BREW_HEADER")
     values = w.get_all_values()
     if not values:
@@ -227,9 +141,9 @@ def shift_brew_numbers_from(n):
     return len(updates)
 
 def log_change(action, details="", bid="", brew_name="", day=""):
-    """Append an audit-trail row to CHANGE_LOG. Deliberately does NOT clear
-    the get_df cache — the log is never read in the UI hot path, and clearing
-    would force every other sheet to refetch on each save."""
+    # Append an audit-trail row to CHANGE_LOG. Deliberately does NOT clear
+    # the get_df cache — the log is never read in the UI hot path, and clearing
+    # would force every other sheet to refetch on each save.
     try:
         w = ws("CHANGE_LOG")
         w.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -253,9 +167,9 @@ SANITY = {
 }
 
 def sanity_gate(checks, key):
-    """checks = list of (is_suspicious, message). Renders warnings and requires
-    an explicit confirm checkbox before allowing the save. Returns True when it
-    is safe to proceed (nothing suspicious, or the user confirmed)."""
+    # checks = list of (is_suspicious, message). Renders warnings and requires
+    # an explicit confirm checkbox before allowing the save. Returns True when it
+    # is safe to proceed (nothing suspicious, or the user confirmed).
     hits = [msg for bad, msg in checks if bad]
     if not hits:
         return True
@@ -278,10 +192,10 @@ UNIT_TO_GRAMS_OR_ML = {"kg": 1000, "g": 1, "l": 1000, "ml": 1, "pack": 1}
 _UNIT_GROUP = {"kg": "mass", "g": "mass", "l": "volume", "ml": "volume", "pack": "pack"}
 
 def convert_to_inventory_unit(qty, from_unit, inventory_unit):
-    """Convert qty from the form's unit to the INVENTORY row's unit via a
-    common base (grams/milliliters). Returns None when the units are
-    incompatible (e.g. 'pack' vs 'kg') — caller must block and warn instead
-    of computing blindly."""
+    # Convert qty from the form's unit to the INVENTORY row's unit via a
+    # common base (grams/milliliters). Returns None when the units are
+    # incompatible (e.g. 'pack' vs 'kg') — caller must block and warn instead
+    # of computing blindly.
     fu = str(from_unit).strip().lower()
     iu = str(inventory_unit).strip().lower()
     if fu not in UNIT_TO_GRAMS_OR_ML or iu not in UNIT_TO_GRAMS_OR_ML:
@@ -291,9 +205,9 @@ def convert_to_inventory_unit(qty, from_unit, inventory_unit):
     return qty * UNIT_TO_GRAMS_OR_ML[fu] / UNIT_TO_GRAMS_OR_ML[iu]
 
 def find_inventory_item(inv_df, patterns):
-    """Find an INVENTORY row whose Item name contains any of the (lowercase)
-    patterns. Returns the row (Series) or None. Name-tolerant on purpose —
-    e.g. 'GYpsum' matches 'gypsum'."""
+    # Find an INVENTORY row whose Item name contains any of the (lowercase)
+    # patterns. Returns the row (Series) or None. Name-tolerant on purpose —
+    # e.g. 'GYpsum' matches 'gypsum'.
     if inv_df.empty or "Item" not in inv_df.columns:
         return None
     for _, r in inv_df.iterrows():
@@ -303,9 +217,9 @@ def find_inventory_item(inv_df, patterns):
     return None
 
 def delete_rows_where(sheet_name, col_name, value):
-    """Delete every row in a worksheet whose col_name equals value.
-    Collects 1-based row indices first, then deletes bottom-up so indices
-    don't shift. Returns the number of deleted rows."""
+    # Delete every row in a worksheet whose col_name equals value.
+    # Collects 1-based row indices first, then deletes bottom-up so indices
+    # don't shift. Returns the number of deleted rows.
     w = ws(sheet_name)
     values = w.get_all_values()
     if not values:
@@ -323,16 +237,16 @@ def delete_rows_where(sheet_name, col_name, value):
     return len(idxs)
 
 def is_brew_finished(brew_id, headers_df):
-    """Single source of truth for 'finished': FG_Date is set (i.e. the
-    'ეს არის FG' checkbox was used). Used by the edit-lock gate."""
+    # Single source of truth for 'finished': FG_Date is set (i.e. the
+    # 'ეს არის FG' checkbox was used). Used by the edit-lock gate.
     match = headers_df[headers_df["Brew_ID"] == brew_id]
     if match.empty:
         return False
     return str(match.iloc[0].get("FG_Date", "")).strip() not in ("", "nan", "None")
 
 def lock_gate(fg_date, key):
-    """Render the finished-brew warning + override checkbox for a tab.
-    Returns True when the tab should stay locked (inputs disabled)."""
+    # Render the finished-brew warning + override checkbox for a tab.
+    # Returns True when the tab should stay locked (inputs disabled).
     st.warning(f"ეს ხარშვა დასრულებულია (FG დაფიქსირდა {fg_date}-ზე). "
                f"ცვლილება არ არის რეკომენდებული.")
     return not st.checkbox("მაინც მინდა რედაქტირება", key=key)
@@ -348,8 +262,8 @@ def close_brew_day(bid, day, closed=True):
     get_df.clear()
 
 def delete_day_rows(sheet, bid, day, category=None):
-    """Delete rows for Brew_ID + Brew_Day (optionally + Category) so a day's
-    data can be replaced on re-save. Bottom-up delete; returns count."""
+    # Delete rows for Brew_ID + Brew_Day (optionally + Category) so a day's
+    # data can be replaced on re-save. Bottom-up delete; returns count.
     w = ws(sheet)
     values = w.get_all_values()
     if not values:
@@ -370,9 +284,9 @@ def delete_day_rows(sheet, bid, day, category=None):
     return len(idxs)
 
 def water_defaults_for_day(bid, day, fallback):
-    """Return saved {Mash:{...}, Sparge:{...}} water values for a brew day.
-    If day 2 has nothing saved, fall back to day 1's saved values; if neither,
-    use `fallback` (profile / manual defaults). Enables day-2 pre-fill."""
+    # Return saved {Mash:{...}, Sparge:{...}} water values for a brew day.
+    # If day 2 has nothing saved, fall back to day 1's saved values; if neither,
+    # use `fallback` (profile / manual defaults). Enables day-2 pre-fill.
     df = get_df("WATER_TREATMENT")
     def rows_for(d):
         if df.empty or "Brew_Day" not in df.columns:
@@ -395,8 +309,8 @@ def water_defaults_for_day(bid, day, fallback):
     return result
 
 def mash_steps_df(bid, day):
-    """5-row editor DataFrame prefilled with a brew day's saved Mash_Step rows.
-    If day 2 has none, prefill from day 1 (day-2 defaults to day-1)."""
+    # 5-row editor DataFrame prefilled with a brew day's saved Mash_Step rows.
+    # If day 2 has none, prefill from day 1 (day-2 defaults to day-1).
     df = get_df("BREW_STEPS")
     rows = []
     if not df.empty and {"Brew_ID", "Category", "Brew_Day"} <= set(df.columns):
@@ -417,10 +331,10 @@ def mash_steps_df(bid, day):
     return out
 
 def copy_ingredients_day1_to_day2(bid, category, form_unit):
-    """Duplicate day-1 rows of a category (Malt/Hop) into day 2. Day 2 is a
-    real second 800 L batch, so it consumes inventory again — deducts per
-    item, skipping any that exceed stock (unless historical mode).
-    Returns (copied, skipped) item-name lists."""
+    # Duplicate day-1 rows of a category (Malt/Hop) into day 2. Day 2 is a
+    # real second 800 L batch, so it consumes inventory again — deducts per
+    # item, skipping any that exceed stock (unless historical mode).
+    # Returns (copied, skipped) item-name lists.
     steps = get_df("BREW_STEPS")
     needed = {"Brew_ID", "Category", "Brew_Day", "Item", "Qty"}
     if steps.empty or not needed <= set(steps.columns):
@@ -451,12 +365,12 @@ def copy_ingredients_day1_to_day2(bid, category, form_unit):
     return copied, skipped
 
 def update_step_qty(bid, category, item, new_qty, timing=None, brew_day=None):
-    """Update the Qty of the BREW_STEPS row matching Brew_ID + Category + Item
-    (a multi-column match — update_cell_by_key can't do that, it keys on one
-    column). When timing is given (hops) the Timing column must match too, and
-    when brew_day is given the Brew_Day column must match: the same ingredient
-    on another brew day is a separate addition, not a duplicate.
-    Returns True if a row was found and updated."""
+    # Update the Qty of the BREW_STEPS row matching Brew_ID + Category + Item
+    # (a multi-column match — update_cell_by_key can't do that, it keys on one
+    # column). When timing is given (hops) the Timing column must match too, and
+    # when brew_day is given the Brew_Day column must match: the same ingredient
+    # on another brew day is a separate addition, not a duplicate.
+    # Returns True if a row was found and updated.
     w = ws("BREW_STEPS")
     values = w.get_all_values()
     if not values:
@@ -490,16 +404,16 @@ def get_setting(key, default=None):
     return match.iloc[0]["Value"]
 
 def _hydro_density_factor(t):
-    """Water density-correction polynomial used by the sheet's hydrometer
-    temperature correction (t in °C)."""
+    # Water density-correction polynomial used by the sheet's hydrometer
+    # temperature correction (t in °C).
     return (1.00130346 - 0.000134722124 * t + 0.00000204052596 * t ** 2
             - 0.00000000232820948 * t ** 3)
 
 def correct_gravity_plato(raw_p, temp_c, ref_temp_c):
-    """Port of the BREW_GRAVITY_LOG Gravity_P_Corrected sheet formula.
-    Converts a raw °P hydrometer reading at temp_c to °P corrected to the
-    hydrometer's reference temperature. Returns rounded float, or None if
-    inputs are missing."""
+    # Port of the BREW_GRAVITY_LOG Gravity_P_Corrected sheet formula.
+    # Converts a raw °P hydrometer reading at temp_c to °P corrected to the
+    # hydrometer's reference temperature. Returns rounded float, or None if
+    # inputs are missing.
     if raw_p in ("", None) or temp_c in ("", None):
         return None
     d = float(raw_p)
@@ -512,9 +426,9 @@ def correct_gravity_plato(raw_p, temp_c, ref_temp_c):
     return round(plato, 2)
 
 def calc_header_metrics(actual_og_p, actual_fg_p, post_boil_vol_l, total_grain_kg, malt_yield_fraction):
-    """Compute BREW_HEADER derived metrics in Python (formerly sheet formulas
-    that only existed on rows 2-22). Returns only the metrics whose inputs
-    are present."""
+    # Compute BREW_HEADER derived metrics in Python (formerly sheet formulas
+    # that only existed on rows 2-22). Returns only the metrics whose inputs
+    # are present.
     def sg(p):
         return 1 + p / (258.6 - (p / 258.2) * 227.1)
     result = {}
@@ -536,15 +450,15 @@ def total_grain_kg(bid):
     return round(sum(_num(x) for x in m["Qty"]), 2) if not m.empty else 0.0
 
 def recalc_header_metrics(bid, og, fg, post_boil_vol, grain_kg, fg_confirmed=False):
-    """Recompute and write Total_Grain_kg + the three derived metrics into
-    BREW_HEADER for one brew. og/fg/post_boil_vol/grain_kg are coerced; missing
-    inputs simply skip the metrics they feed.
-
-    Eff/ADF/ABV are FG-dependent and only meaningful once FG is *confirmed*
-    (the "ეს არის FG" checkbox, i.e. FG_Date is set). Pass fg_confirmed=True
-    only in that case; otherwise those three are skipped so a provisional
-    interim reading never lands in the header. Total_Grain_kg is written
-    regardless — it is valid independently of FG."""
+    # Recompute and write Total_Grain_kg + the three derived metrics into
+    # BREW_HEADER for one brew. og/fg/post_boil_vol/grain_kg are coerced; missing
+    # inputs simply skip the metrics they feed.
+    #
+    # Eff/ADF/ABV are FG-dependent and only meaningful once FG is *confirmed*
+    # (the "ეს არის FG" checkbox, i.e. FG_Date is set). Pass fg_confirmed=True
+    # only in that case; otherwise those three are skipped so a provisional
+    # interim reading never lands in the header. Total_Grain_kg is written
+    # regardless — it is valid independently of FG.
     myf = _num(get_setting("Malt_Yield_Fraction", 0.8), 0.8)
     metrics = calc_header_metrics(_num(og), _num(fg), _num(post_boil_vol), _num(grain_kg), myf)
     if grain_kg:
