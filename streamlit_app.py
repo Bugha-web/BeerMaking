@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "2026-08-04 · v7 (brew-number insert)"
+APP_VERSION = "2026-08-04 · v8 (B2B კლიენტები)"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -101,7 +101,84 @@ SHEET_HEADERS = {
                         "CaCl2_g", "Lactic_ml", "Target_pH", "Notes"],
     "CHANGE_LOG": ["Timestamp", "Operator", "Brew_ID", "Brew_Name", "Brew_Day",
                    "Action", "Details"],
+    # ---- B2B client module ----
+    "CLIENTS": ["Client_ID", "Name", "Type", "Contact_Person", "Phone", "Address",
+                "Status", "Payment_Terms_Days", "Created_Date", "Notes"],
+    "PRODUCTS": ["Product_ID", "Name", "Category", "Unit", "Default_Price_GEL",
+                 "Active", "Notes"],
+    "CLIENT_PRICES": ["Client_ID", "Product_ID", "Price_GEL_per_L", "Updated_Date", "Notes"],
+    "SHIPMENTS": ["Shipment_ID", "Date", "Client_ID", "Product_ID", "Volume_L",
+                  "Price_per_L", "Total_GEL", "Paid_Now_GEL", "Kegs_Out", "Notes", "Operator"],
+    "PAYMENTS": ["Payment_ID", "Date", "Client_ID", "Amount_GEL", "Method",
+                 "Shipment_ID", "Notes", "Operator"],
+    "ASSET_MOVES": ["Move_ID", "Date", "Client_ID", "Asset_Type", "Detail",
+                    "Direction", "Qty", "Notes", "Operator"],
 }
+
+# equipment lent to clients; the UI also allows typing a new type
+ASSET_TYPES = ["კეგი", "მაცივარი", "დიდი მაცივარი", "პეგასი", "კობრა",
+               "მაგიდა (სადგამი)", "CO2 ბალონი"]
+PRODUCT_CATEGORIES = ["ლუდი", "ღვინო", "არაყი", "კონიაკი", "სხვა"]
+
+def client_balance(client_id, ship_df=None, pay_df=None):
+    # Owed = everything shipped minus everything paid. Never stored, always
+    # recomputed, so the balance can't drift out of sync with the records.
+    ship_df = get_df("SHIPMENTS") if ship_df is None else ship_df
+    pay_df = get_df("PAYMENTS") if pay_df is None else pay_df
+    billed = paid = 0.0
+    if not ship_df.empty and "Client_ID" in ship_df.columns:
+        s = ship_df[ship_df["Client_ID"] == client_id]
+        billed = sum(_num(x) for x in s.get("Total_GEL", []))
+        paid += sum(_num(x) for x in s.get("Paid_Now_GEL", []))
+    if not pay_df.empty and "Client_ID" in pay_df.columns:
+        p = pay_df[pay_df["Client_ID"] == client_id]
+        paid += sum(_num(x) for x in p.get("Amount_GEL", []))
+    return round(billed - paid, 2)
+
+def client_assets(client_id, moves_df=None):
+    # Net equipment currently held by a client: shipped out minus returned.
+    moves_df = get_df("ASSET_MOVES") if moves_df is None else moves_df
+    held = {}
+    if moves_df.empty or "Client_ID" not in moves_df.columns:
+        return held
+    for _, r in moves_df[moves_df["Client_ID"] == client_id].iterrows():
+        t = str(r.get("Asset_Type", "")).strip()
+        if not t:
+            continue
+        q = _num(r.get("Qty"))
+        held[t] = held.get(t, 0) + (-q if str(r.get("Direction", "")).startswith("დაბრ") else q)
+    return {k: v for k, v in held.items() if abs(v) > 1e-9}
+
+def client_price(client_id, product_id, prices_df=None, products_df=None):
+    # Per-client price if one is set, otherwise the product's default.
+    prices_df = get_df("CLIENT_PRICES") if prices_df is None else prices_df
+    if not prices_df.empty and {"Client_ID", "Product_ID"} <= set(prices_df.columns):
+        m = prices_df[(prices_df["Client_ID"] == client_id)
+                      & (prices_df["Product_ID"] == product_id)]
+        if not m.empty:
+            return _num(m.iloc[-1].get("Price_GEL_per_L"))
+    products_df = get_df("PRODUCTS") if products_df is None else products_df
+    if not products_df.empty and "Product_ID" in products_df.columns:
+        m = products_df[products_df["Product_ID"] == product_id]
+        if not m.empty:
+            return _num(m.iloc[0].get("Default_Price_GEL"))
+    return 0.0
+
+def set_client_price(client_id, product_id, price):
+    # Upsert the client's current price for a product.
+    w = ws("CLIENT_PRICES")
+    values = w.get_all_values()
+    hdr = values[0]
+    ci, pi, pr = hdr.index("Client_ID"), hdr.index("Product_ID"), hdr.index("Price_GEL_per_L")
+    di = hdr.index("Updated_Date")
+    for ridx, rowv in enumerate(values[1:], start=2):
+        if len(rowv) > max(ci, pi) and rowv[ci] == client_id and rowv[pi] == product_id:
+            w.update_cell(ridx, pr + 1, price)
+            w.update_cell(ridx, di + 1, str(date.today()))
+            get_df.clear()
+            return
+    append_row("CLIENT_PRICES", {"Client_ID": client_id, "Product_ID": product_id,
+                                 "Price_GEL_per_L": price, "Updated_Date": str(date.today())})
 
 BREW_NUM_RE = re.compile(r"^ხარშვა\s+(\d+)\s*—\s*(.*)$")
 
@@ -477,7 +554,8 @@ def recalc_header_metrics(bid, og, fg, post_boil_vol, grain_kg, fg_confirmed=Fal
 # ============================================================
 # SIDEBAR NAV
 # ============================================================
-page = st.sidebar.radio("გვერდი", ["📦 Inventory", "🍺 ხარშვა"], key="nav_radio")
+page = st.sidebar.radio("გვერდი", ["📦 Inventory", "🍺 ხარშვა", "🤝 კლიენტები"],
+                        key="nav_radio")
 
 # ---- historical entry mode: record old brews without touching stock ----
 st.session_state.setdefault("historical_mode", False)
@@ -569,7 +647,7 @@ if page == "📦 Inventory":
 # ============================================================
 # PAGE 2 — BREW
 # ============================================================
-else:
+elif page == "🍺 ხარშვა":
     st.title("🍺 ხარშვის ჟურნალი")
 
     headers_df = get_df("BREW_HEADER")
@@ -1475,3 +1553,319 @@ else:
             if st.button("💾 შედეგის შენახვა", disabled=locked):
                 update_cell_by_key("BREW_HEADER", "Brew_ID", bid, "Outcome_Note", outcome)
                 st.success("შენახულია.")
+
+# ============================================================
+# PAGE 3 — B2B CLIENTS
+# ============================================================
+else:
+    st.title("🤝 კლიენტები (B2B)")
+
+    clients_df = get_df("CLIENTS")
+    products_df = get_df("PRODUCTS")
+    ship_df = get_df("SHIPMENTS")
+    pay_df = get_df("PAYMENTS")
+    moves_df = get_df("ASSET_MOVES")
+
+    # label -> id maps for the selectboxes
+    cl_map, pr_map = {}, {}
+    if not clients_df.empty and "Client_ID" in clients_df.columns:
+        for _, r in clients_df.iterrows():
+            if str(r.get("Status", "")).strip() != "არქივი":
+                cl_map[str(r.get("Name"))] = r["Client_ID"]
+    if not products_df.empty and "Product_ID" in products_df.columns:
+        for _, r in products_df.iterrows():
+            pr_map[f"{r.get('Name')} ({r.get('Category')})"] = r["Product_ID"]
+
+    CL_TABS = ["📋 მიმოხილვა", "👤 კლიენტის ბარათი", "🚚 გატანა",
+               "💰 გადახდა", "📦 ინვენტარი", "⚙️ კლიენტები/პროდუქტები"]
+    if "cl_tab" not in st.session_state:
+        st.session_state.cl_tab = "📋 მიმოხილვა"
+    st.session_state.cl_tab = st.radio(
+        "ტაბი", CL_TABS, horizontal=True, label_visibility="collapsed",
+        key="cl_tab_radio", index=CL_TABS.index(st.session_state.cl_tab))
+
+    # ---------------- OVERVIEW ----------------
+    if st.session_state.cl_tab == "📋 მიმოხილვა":
+        if not cl_map:
+            st.info("კლიენტი ჯერ არ არის დამატებული — იხ. ტაბი „⚙️ კლიენტები/პროდუქტები“.")
+        else:
+            rows = []
+            for name, cid in cl_map.items():
+                bal = client_balance(cid, ship_df, pay_df)
+                assets = client_assets(cid, moves_df)
+                last = ""
+                if not ship_df.empty and "Client_ID" in ship_df.columns:
+                    s = ship_df[ship_df["Client_ID"] == cid]
+                    if not s.empty:
+                        last = str(s.iloc[-1].get("Date", ""))
+                other = ", ".join(f"{k} {v:g}" for k, v in assets.items() if k != "კეგი")
+                rows.append({
+                    "კლიენტი": name,
+                    "დავალიანება (₾)": bal,
+                    "კეგი": assets.get("კეგი", 0),
+                    "სხვა ინვენტარი": other or "—",
+                    "ბოლო გატანა": last or "—",
+                })
+            ov = pd.DataFrame(rows).sort_values("დავალიანება (₾)", ascending=False)
+            c1, c2, c3 = st.columns(3, gap="large")
+            c1.metric("სულ დავალიანება (₾)", f"{ov['დავალიანება (₾)'].sum():g}")
+            c2.metric("კლიენტები", len(ov))
+            c3.metric("კეგი კლიენტებთან", f"{ov['კეგი'].sum():g}")
+            st.dataframe(ov, use_container_width=True, hide_index=True)
+
+    # ---------------- CLIENT CARD ----------------
+    elif st.session_state.cl_tab == "👤 კლიენტის ბარათი":
+        if not cl_map:
+            st.info("ჯერ დაამატე კლიენტი.")
+        else:
+            pick = st.selectbox("კლიენტი", list(cl_map.keys()), key="card_client")
+            cid = cl_map[pick]
+            crow = clients_df[clients_df["Client_ID"] == cid].iloc[0]
+            bal = client_balance(cid, ship_df, pay_df)
+            assets = client_assets(cid, moves_df)
+
+            with st.container(border=True, key="clcard-head"):
+                c1, c2, c3 = st.columns(3)
+                c1.markdown(f"**ტიპი**  \n{crow.get('Type') or '—'}")
+                c2.markdown(f"**საკონტაქტო**  \n{crow.get('Contact_Person') or '—'}")
+                c3.markdown(f"**ტელეფონი**  \n{crow.get('Phone') or '—'}")
+                st.metric("დავალიანება (₾)", f"{bal:g}")
+                if assets:
+                    st.markdown("**მასთან არსებული ინვენტარი:** "
+                                + " · ".join(f"{k} **{v:g}**" for k, v in assets.items()))
+                else:
+                    st.caption("ინვენტარი მასთან არ ირიცხება.")
+
+            with st.container(border=True, key="clcard-ship"):
+                st.markdown("#### 🚚 გატანების ისტორია")
+                s = ship_df[ship_df["Client_ID"] == cid] if not ship_df.empty else pd.DataFrame()
+                if s.empty:
+                    st.caption("გატანა ჯერ არ არის.")
+                else:
+                    s = s.copy()
+                    s["პროდუქტი"] = s["Product_ID"].map(
+                        lambda p: next((k for k, v in pr_map.items() if v == p), p))
+                    cols = ["Date", "პროდუქტი", "Volume_L", "Price_per_L", "Total_GEL",
+                            "Paid_Now_GEL", "Kegs_Out", "Notes"]
+                    st.dataframe(s[[c for c in cols if c in s.columns]].iloc[::-1],
+                                 use_container_width=True, hide_index=True)
+
+            with st.container(border=True, key="clcard-pay"):
+                st.markdown("#### 💰 გადახდები")
+                p = pay_df[pay_df["Client_ID"] == cid] if not pay_df.empty else pd.DataFrame()
+                if p.empty:
+                    st.caption("ცალკე გადახდა ჯერ არ არის.")
+                else:
+                    cols = ["Date", "Amount_GEL", "Method", "Notes"]
+                    st.dataframe(p[[c for c in cols if c in p.columns]].iloc[::-1],
+                                 use_container_width=True, hide_index=True)
+
+            with st.container(border=True, key="clcard-assets"):
+                st.markdown("#### 📦 ინვენტარის მოძრაობა")
+                m = moves_df[moves_df["Client_ID"] == cid] if not moves_df.empty else pd.DataFrame()
+                if m.empty:
+                    st.caption("მოძრაობა ჯერ არ არის.")
+                else:
+                    cols = ["Date", "Asset_Type", "Detail", "Direction", "Qty", "Notes"]
+                    st.dataframe(m[[c for c in cols if c in m.columns]].iloc[::-1],
+                                 use_container_width=True, hide_index=True)
+
+    # ---------------- SHIPMENT ----------------
+    elif st.session_state.cl_tab == "🚚 გატანა":
+        if not cl_map or not pr_map:
+            st.info("ჯერ დაამატე კლიენტი და პროდუქტი („⚙️“ ტაბი).")
+        else:
+            c1, c2 = st.columns(2)
+            cname = c1.selectbox("კლიენტი", list(cl_map.keys()), key="sh_client")
+            pname = c2.selectbox("პროდუქტი", list(pr_map.keys()), key="sh_product")
+            cid, pid = cl_map[cname], pr_map[pname]
+
+            cur_price = client_price(cid, pid, get_df("CLIENT_PRICES"), products_df)
+            c3, c4, c5 = st.columns(3)
+            s_date = c3.date_input("თარიღი", value=date.today(), key="sh_date")
+            vol = c4.number_input("მოცულობა (ლ)", min_value=0.0, step=1.0, key="sh_vol")
+            price = c5.number_input("ფასი ₾/ლ", min_value=0.0, step=0.1,
+                                    value=float(cur_price), key="sh_price")
+            total = round(vol * price, 2)
+
+            c6, c7 = st.columns(2)
+            kegs = c6.number_input("კეგი გაჰყვა (ცალი)", min_value=0, step=1, key="sh_kegs")
+            paid_now = c7.number_input("ახლა გადაიხადა (₾)", min_value=0.0, step=1.0,
+                                       value=float(total), key="sh_paid")
+            note = st.text_input("შენიშვნა", key="sh_note")
+
+            st.markdown(f"### ჯამი: **{total:g} ₾**")
+            if paid_now < total:
+                st.warning(f"ნაშთი დარჩება: **{total - paid_now:g} ₾** (დაემატება დავალიანებას)")
+            price_changed = abs(price - cur_price) > 1e-9 and cur_price > 0
+            save_price = False
+            if price_changed:
+                save_price = st.checkbox(
+                    f"ამ კლიენტის ფასიც განვაახლო: {cur_price:g} → {price:g} ₾/ლ",
+                    value=True, key="sh_saveprice")
+
+            ok = sanity_gate([
+                (vol > 2000, f"მოცულობა {vol:g} ლ — ჩვეულებრივზე ბევრად მეტია."),
+                (price > 100, f"ფასი {price:g} ₾/ლ — ჩვეულებრივზე ბევრად მეტია."),
+                (paid_now > total, f"გადახდილი ({paid_now:g} ₾) ჯამზე ({total:g} ₾) მეტია."),
+                (kegs > 50, f"კეგი {kegs} ცალი — ჩვეულებრივზე ბევრად მეტია."),
+            ], key=f"sanity_ship_{cid}")
+
+            if st.button("💾 გატანის ჩაწერა", disabled=not ok) and vol > 0:
+                sid = new_id("SHIP")
+                append_row("SHIPMENTS", {
+                    "Shipment_ID": sid, "Date": str(s_date), "Client_ID": cid,
+                    "Product_ID": pid, "Volume_L": vol, "Price_per_L": price,
+                    "Total_GEL": total, "Paid_Now_GEL": paid_now, "Kegs_Out": kegs,
+                    "Notes": note, "Operator": st.session_state.get("operator", ""),
+                })
+                if kegs:  # kegs leaving with the order are tracked as an asset move
+                    append_row("ASSET_MOVES", {
+                        "Move_ID": new_id("MOVE"), "Date": str(s_date), "Client_ID": cid,
+                        "Asset_Type": "კეგი", "Detail": "", "Direction": "გატანა",
+                        "Qty": kegs, "Notes": f"გატანასთან ერთად ({sid})",
+                        "Operator": st.session_state.get("operator", ""),
+                    })
+                if save_price:
+                    set_client_price(cid, pid, price)
+                log_change("B2B გატანა",
+                           f"{cname}: {pname} {vol:g}ლ × {price:g}₾ = {total:g}₾, "
+                           f"გადახდილი {paid_now:g}₾, კეგი {kegs}")
+                rest = total - paid_now
+                st.success(f"ჩაწერილია: {total:g} ₾"
+                           + (f", ნაშთი {rest:g} ₾" if rest > 0 else ", სრულად გადახდილი"))
+                st.rerun()
+
+    # ---------------- PAYMENT ----------------
+    elif st.session_state.cl_tab == "💰 გადახდა":
+        if not cl_map:
+            st.info("ჯერ დაამატე კლიენტი.")
+        else:
+            cname = st.selectbox("კლიენტი", list(cl_map.keys()), key="pay_client")
+            cid = cl_map[cname]
+            bal = client_balance(cid, ship_df, pay_df)
+            st.metric("მიმდინარე დავალიანება (₾)", f"{bal:g}")
+            c1, c2, c3 = st.columns(3)
+            p_date = c1.date_input("თარიღი", value=date.today(), key="pay_date")
+            amount = c2.number_input("თანხა (₾)", min_value=0.0, step=10.0,
+                                     value=float(max(bal, 0)), key="pay_amount")
+            method = c3.selectbox("მეთოდი", ["ნაღდი", "გადარიცხვა", "სხვა"], key="pay_method")
+            note = st.text_input("შენიშვნა", key="pay_note")
+            ok = sanity_gate([
+                (amount > bal + 0.01 and bal > 0,
+                 f"გადახდა ({amount:g} ₾) დავალიანებაზე ({bal:g} ₾) მეტია — წინსწრებით?"),
+            ], key=f"sanity_pay_{cid}")
+            if st.button("💾 გადახდის ჩაწერა", disabled=not ok) and amount > 0:
+                append_row("PAYMENTS", {
+                    "Payment_ID": new_id("PAY"), "Date": str(p_date), "Client_ID": cid,
+                    "Amount_GEL": amount, "Method": method, "Shipment_ID": "",
+                    "Notes": note, "Operator": st.session_state.get("operator", ""),
+                })
+                log_change("B2B გადახდა", f"{cname}: {amount:g}₾ ({method})")
+                st.success(f"ჩაწერილია. ახალი ბალანსი: {bal - amount:g} ₾")
+                st.rerun()
+
+    # ---------------- ASSETS ----------------
+    elif st.session_state.cl_tab == "📦 ინვენტარი":
+        if not cl_map:
+            st.info("ჯერ დაამატე კლიენტი.")
+        else:
+            cname = st.selectbox("კლიენტი", list(cl_map.keys()), key="as_client")
+            cid = cl_map[cname]
+            held = client_assets(cid, moves_df)
+            if held:
+                st.markdown("**ამჟამად მასთან:** "
+                            + " · ".join(f"{k} **{v:g}**" for k, v in held.items()))
+            else:
+                st.caption("ამჟამად ინვენტარი მასთან არ ირიცხება.")
+
+            c1, c2 = st.columns(2)
+            atype = c1.selectbox("ტიპი", ASSET_TYPES + ["✏️ სხვა (ხელით)"], key="as_type")
+            if atype == "✏️ სხვა (ხელით)":
+                atype = c1.text_input("ახალი ტიპის დასახელება", key="as_type_custom").strip()
+            direction = c2.radio("მიმართულება", ["გატანა", "დაბრუნება"],
+                                 horizontal=True, key="as_dir")
+            c3, c4, c5 = st.columns(3)
+            a_date = c3.date_input("თარიღი", value=date.today(), key="as_date")
+            qty = c4.number_input("რაოდენობა", min_value=1, step=1, key="as_qty")
+            detail = c5.text_input("დეტალი (მაგ. 50ლ, სერიული)", key="as_detail")
+            note = st.text_input("შენიშვნა", key="as_note")
+
+            have = held.get(atype, 0)
+            ok = sanity_gate([
+                (direction == "დაბრუნება" and qty > have,
+                 f"დაბრუნება {qty} ცალი, მაგრამ მასთან {have:g} ირიცხება."),
+            ], key=f"sanity_asset_{cid}")
+            if st.button(f"💾 {direction}-ის ჩაწერა", disabled=not ok) and atype:
+                append_row("ASSET_MOVES", {
+                    "Move_ID": new_id("MOVE"), "Date": str(a_date), "Client_ID": cid,
+                    "Asset_Type": atype, "Detail": detail, "Direction": direction,
+                    "Qty": qty, "Notes": note,
+                    "Operator": st.session_state.get("operator", ""),
+                })
+                log_change("B2B ინვენტარი", f"{cname}: {atype} {direction} {qty} ცალი")
+                st.success(f"{atype} — {direction} {qty} ცალი ჩაწერილია.")
+                st.rerun()
+
+    # ---------------- SETUP ----------------
+    else:
+        st.markdown("### 👥 კლიენტები")
+        if not clients_df.empty:
+            st.dataframe(clients_df, use_container_width=True, hide_index=True)
+        with st.form("add_client", clear_on_submit=True):
+            st.markdown("**ახალი კლიენტი**")
+            c1, c2, c3 = st.columns(3)
+            cname_new = c1.text_input("დასახელება")
+            ctype = c2.selectbox("ტიპი", ["ბარი", "რესტორანი", "მაღაზია", "სხვა"])
+            cperson = c3.text_input("საკონტაქტო პირი")
+            c4, c5, c6 = st.columns(3)
+            cphone = c4.text_input("ტელეფონი")
+            caddr = c5.text_input("მისამართი")
+            cterms = c6.number_input("გადახდის ვადა (დღე)", min_value=0, step=1, value=0)
+            cnote = st.text_input("შენიშვნა", key="cl_note")
+            if st.form_submit_button("დამატება") and cname_new:
+                append_row("CLIENTS", {
+                    "Client_ID": new_id("CL"), "Name": cname_new, "Type": ctype,
+                    "Contact_Person": cperson, "Phone": cphone, "Address": caddr,
+                    "Status": "აქტიური", "Payment_Terms_Days": cterms,
+                    "Created_Date": str(date.today()), "Notes": cnote,
+                })
+                log_change("B2B კლიენტი დაემატა", cname_new)
+                st.success(f"{cname_new} დაემატა.")
+                st.rerun()
+
+        st.divider()
+        st.markdown("### 🍾 პროდუქტები")
+        if not products_df.empty:
+            st.dataframe(products_df, use_container_width=True, hide_index=True)
+        with st.form("add_product", clear_on_submit=True):
+            st.markdown("**ახალი პროდუქტი**")
+            c1, c2, c3 = st.columns(3)
+            pname_new = c1.text_input("დასახელება")
+            pcat = c2.selectbox("კატეგორია", PRODUCT_CATEGORIES)
+            pprice = c3.number_input("ბაზისური ფასი ₾/ლ", min_value=0.0, step=0.1)
+            pnote = st.text_input("შენიშვნა", key="pr_note")
+            if st.form_submit_button("დამატება") and pname_new:
+                append_row("PRODUCTS", {
+                    "Product_ID": new_id("PR"), "Name": pname_new, "Category": pcat,
+                    "Unit": "ლ", "Default_Price_GEL": pprice, "Active": "1",
+                    "Notes": pnote,
+                })
+                log_change("B2B პროდუქტი დაემატა", f"{pname_new} ({pcat}) {pprice:g}₾/ლ")
+                st.success(f"{pname_new} დაემატა.")
+                st.rerun()
+
+        if cl_map and pr_map:
+            st.divider()
+            st.markdown("### 💵 კლიენტის ფასები")
+            c1, c2, c3 = st.columns(3)
+            pc = c1.selectbox("კლიენტი", list(cl_map.keys()), key="pp_client")
+            pp = c2.selectbox("პროდუქტი", list(pr_map.keys()), key="pp_product")
+            cur = client_price(cl_map[pc], pr_map[pp], get_df("CLIENT_PRICES"), products_df)
+            newp = c3.number_input("ფასი ₾/ლ", min_value=0.0, step=0.1,
+                                   value=float(cur), key="pp_price")
+            if st.button("💾 ფასის შენახვა"):
+                set_client_price(cl_map[pc], pr_map[pp], newp)
+                log_change("B2B ფასი", f"{pc} / {pp}: {cur:g} → {newp:g} ₾/ლ")
+                st.success("ფასი შენახულია.")
+                st.rerun()
