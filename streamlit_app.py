@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "2026-08-04 · v8 (B2B კლიენტები)"
+APP_VERSION = "2026-08-04 · v9 (კეგები 30ლ + ბალანსის fix)"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -108,7 +108,8 @@ SHEET_HEADERS = {
                  "Active", "Notes"],
     "CLIENT_PRICES": ["Client_ID", "Product_ID", "Price_GEL_per_L", "Updated_Date", "Notes"],
     "SHIPMENTS": ["Shipment_ID", "Date", "Client_ID", "Product_ID", "Volume_L",
-                  "Price_per_L", "Total_GEL", "Paid_Now_GEL", "Kegs_Out", "Notes", "Operator"],
+                  "Price_per_L", "Total_GEL", "Paid_Now_GEL", "Kegs_Out", "Notes",
+                  "Operator", "Kegs_Returned"],
     "PAYMENTS": ["Payment_ID", "Date", "Client_ID", "Amount_GEL", "Method",
                  "Shipment_ID", "Notes", "Operator"],
     "ASSET_MOVES": ["Move_ID", "Date", "Client_ID", "Asset_Type", "Detail",
@@ -119,6 +120,28 @@ SHEET_HEADERS = {
 ASSET_TYPES = ["კეგი", "მაცივარი", "დიდი მაცივარი", "პეგასი", "კობრა",
                "მაგიდა (სადგამი)", "CO2 ბალონი"]
 PRODUCT_CATEGORIES = ["ლუდი", "ღვინო", "არაყი", "კონიაკი", "სხვა"]
+
+def keg_size_l():
+    # all kegs are the same size; configurable in SETTINGS
+    return _num(get_setting("Keg_Size_L", 30), 30) or 30
+
+def kegs_total():
+    return _num(get_setting("Kegs_Total", 58), 58)
+
+def kegs_at_clients(moves_df=None):
+    # every keg that went out and hasn't come back, across all clients
+    moves_df = get_df("ASSET_MOVES") if moves_df is None else moves_df
+    if moves_df.empty or "Asset_Type" not in moves_df.columns:
+        return 0.0
+    out = 0.0
+    for _, r in moves_df[moves_df["Asset_Type"] == "კეგი"].iterrows():
+        q = _num(r.get("Qty"))
+        out += -q if str(r.get("Direction", "")).startswith("დაბრ") else q
+    return round(out, 2)
+
+def kegs_free():
+    # kegs sitting at the brewery right now
+    return round(kegs_total() - kegs_at_clients(), 2)
 
 def client_balance(client_id, ship_df=None, pay_df=None):
     # Owed = everything shipped minus everything paid. Never stored, always
@@ -1607,10 +1630,12 @@ else:
                     "ბოლო გატანა": last or "—",
                 })
             ov = pd.DataFrame(rows).sort_values("დავალიანება (₾)", ascending=False)
-            c1, c2, c3 = st.columns(3, gap="large")
+            c1, c2, c3, c4 = st.columns(4, gap="large")
             c1.metric("სულ დავალიანება (₾)", f"{ov['დავალიანება (₾)'].sum():g}")
             c2.metric("კლიენტები", len(ov))
-            c3.metric("კეგი კლიენტებთან", f"{ov['კეგი'].sum():g}")
+            c3.metric("კეგი კლიენტებთან", f"{kegs_at_clients(moves_df):g}")
+            c4.metric("ქარხანაში თავისუფალი", f"{kegs_free():g}")
+            st.caption(f"სულ კეგი: {kegs_total():g} (შესაცვლელად — SETTINGS → Kegs_Total)")
             st.dataframe(ov, use_container_width=True, hide_index=True)
 
     # ---------------- CLIENT CARD ----------------
@@ -1680,23 +1705,42 @@ else:
             pname = c2.selectbox("პროდუქტი", list(pr_map.keys()), key="sh_product")
             cid, pid = cl_map[cname], pr_map[pname]
 
+            ksize = keg_size_l()
+            held_now = client_assets(cid, moves_df).get("კეგი", 0)
+            free_now = kegs_free()
+            k1, k2 = st.columns(2)
+            k1.metric("ქარხანაში თავისუფალი კეგი", f"{free_now:g}")
+            k2.metric(f"{cname}-თან ახლა", f"{held_now:g}")
+
             cur_price = client_price(cid, pid, get_df("CLIENT_PRICES"), products_df)
             c3, c4, c5 = st.columns(3)
             s_date = c3.date_input("თარიღი", value=date.today(), key="sh_date")
-            vol = c4.number_input("მოცულობა (ლ)", min_value=0.0, step=1.0, key="sh_vol")
+            kegs = c4.number_input(f"წაიღო სავსე კეგი (×{ksize:g}ლ)", min_value=0, step=1,
+                                   key="sh_kegs")
             price = c5.number_input("ფასი ₾/ლ", min_value=0.0, step=0.1,
                                     value=float(cur_price), key="sh_price")
+            vol = kegs * ksize
             total = round(vol * price, 2)
 
             c6, c7 = st.columns(2)
-            kegs = c6.number_input("კეგი გაჰყვა (ცალი)", min_value=0, step=1, key="sh_kegs")
+            kegs_back = c6.number_input("დააბრუნა ცარიელი კეგი", min_value=0, step=1,
+                                        key="sh_kegs_back")
+            # never assume payment: the debt is created by default and any
+            # payment is entered explicitly
             paid_now = c7.number_input("ახლა გადაიხადა (₾)", min_value=0.0, step=1.0,
-                                       value=float(total), key="sh_paid")
+                                       value=0.0, key="sh_paid")
             note = st.text_input("შენიშვნა", key="sh_note")
 
-            st.markdown(f"### ჯამი: **{total:g} ₾**")
+            st.markdown(f"### {kegs} კეგი × {ksize:g}ლ = **{vol:g} ლ** × {price:g} ₾ "
+                        f"= **{total:g} ₾**")
             if paid_now < total:
-                st.warning(f"ნაშთი დარჩება: **{total - paid_now:g} ₾** (დაემატება დავალიანებას)")
+                st.warning(f"დავალიანებას დაემატება: **{total - paid_now:g} ₾**")
+            elif total > 0:
+                st.success("სრულად გადახდილი — დავალიანება არ იქმნება.")
+            net = kegs - kegs_back
+            st.caption(f"კეგები: −{kegs} გატანა, +{kegs_back} დაბრუნება → "
+                       f"{cname}-თან იქნება **{held_now + net:g}**, "
+                       f"ქარხანაში **{free_now - net:g}**")
             price_changed = abs(price - cur_price) > 1e-9 and cur_price > 0
             save_price = False
             if price_changed:
@@ -1705,32 +1749,41 @@ else:
                     value=True, key="sh_saveprice")
 
             ok = sanity_gate([
-                (vol > 2000, f"მოცულობა {vol:g} ლ — ჩვეულებრივზე ბევრად მეტია."),
                 (price > 100, f"ფასი {price:g} ₾/ლ — ჩვეულებრივზე ბევრად მეტია."),
                 (paid_now > total, f"გადახდილი ({paid_now:g} ₾) ჯამზე ({total:g} ₾) მეტია."),
-                (kegs > 50, f"კეგი {kegs} ცალი — ჩვეულებრივზე ბევრად მეტია."),
+                (kegs > free_now,
+                 f"წასაღებია {kegs} კეგი, ქარხანაში კი {free_now:g} თავისუფალია."),
+                (kegs_back > held_now,
+                 f"აბრუნებს {kegs_back} კეგს, მაგრამ მასთან {held_now:g} ირიცხება."),
             ], key=f"sanity_ship_{cid}")
 
-            if st.button("💾 გატანის ჩაწერა", disabled=not ok) and vol > 0:
+            if st.button("💾 გატანის ჩაწერა", disabled=not ok) and (kegs > 0 or kegs_back > 0):
                 sid = new_id("SHIP")
                 append_row("SHIPMENTS", {
                     "Shipment_ID": sid, "Date": str(s_date), "Client_ID": cid,
                     "Product_ID": pid, "Volume_L": vol, "Price_per_L": price,
                     "Total_GEL": total, "Paid_Now_GEL": paid_now, "Kegs_Out": kegs,
-                    "Notes": note, "Operator": st.session_state.get("operator", ""),
+                    "Kegs_Returned": kegs_back, "Notes": note,
+                    "Operator": st.session_state.get("operator", ""),
                 })
-                if kegs:  # kegs leaving with the order are tracked as an asset move
+                op = st.session_state.get("operator", "")
+                if kegs_back:  # empties come back first
                     append_row("ASSET_MOVES", {
                         "Move_ID": new_id("MOVE"), "Date": str(s_date), "Client_ID": cid,
-                        "Asset_Type": "კეგი", "Detail": "", "Direction": "გატანა",
-                        "Qty": kegs, "Notes": f"გატანასთან ერთად ({sid})",
-                        "Operator": st.session_state.get("operator", ""),
+                        "Asset_Type": "კეგი", "Detail": "ცარიელი", "Direction": "დაბრუნება",
+                        "Qty": kegs_back, "Notes": f"გატანასთან ერთად ({sid})", "Operator": op,
+                    })
+                if kegs:  # then the full ones go out
+                    append_row("ASSET_MOVES", {
+                        "Move_ID": new_id("MOVE"), "Date": str(s_date), "Client_ID": cid,
+                        "Asset_Type": "კეგი", "Detail": "სავსე", "Direction": "გატანა",
+                        "Qty": kegs, "Notes": f"გატანასთან ერთად ({sid})", "Operator": op,
                     })
                 if save_price:
                     set_client_price(cid, pid, price)
                 log_change("B2B გატანა",
-                           f"{cname}: {pname} {vol:g}ლ × {price:g}₾ = {total:g}₾, "
-                           f"გადახდილი {paid_now:g}₾, კეგი {kegs}")
+                           f"{cname}: {pname} {kegs} კეგი ({vol:g}ლ) × {price:g}₾ = {total:g}₾, "
+                           f"გადახდილი {paid_now:g}₾, დააბრუნა {kegs_back}")
                 rest = total - paid_now
                 st.success(f"ჩაწერილია: {total:g} ₾"
                            + (f", ნაშთი {rest:g} ₾" if rest > 0 else ", სრულად გადახდილი"))
@@ -1773,6 +1826,9 @@ else:
             cname = st.selectbox("კლიენტი", list(cl_map.keys()), key="as_client")
             cid = cl_map[cname]
             held = client_assets(cid, moves_df)
+            k1, k2 = st.columns(2)
+            k1.metric("ქარხანაში თავისუფალი კეგი", f"{kegs_free():g}")
+            k2.metric("კეგი ამ კლიენტთან", f"{held.get('კეგი', 0):g}")
             if held:
                 st.markdown("**ამჟამად მასთან:** "
                             + " · ".join(f"{k} **{v:g}**" for k, v in held.items()))
