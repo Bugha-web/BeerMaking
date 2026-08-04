@@ -9,6 +9,10 @@ import re
 
 st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
+# Bump on every deploy. Shown in the sidebar so it is obvious at a glance
+# whether Streamlit Cloud is serving the latest build or a stale one.
+APP_VERSION = "2026-08-04 · v7 (brew-number insert)"
+
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
 # Colors/typography come from .streamlit/config.toml; this only covers
@@ -490,6 +494,7 @@ hist_mode = st.session_state.historical_mode
 # who is entering data — recorded in CHANGE_LOG (the app has no login)
 st.sidebar.text_input("👤 ვინ ავსებს (ჟურნალისთვის)", key="operator",
                       placeholder="სახელი")
+st.sidebar.caption(f"ვერსია: {APP_VERSION}")
 
 # ============================================================
 # PAGE 1 — INVENTORY
