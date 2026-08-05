@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "2026-08-04 · v10 (დღის დახურვის fix)"
+APP_VERSION = "2026-08-04 · v11 (quota fix — ws კეშირება)"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -52,8 +52,12 @@ def get_sheet():
     client = get_client()
     return client.open_by_key(st.secrets["sheet_id"])
 
+@st.cache_resource(show_spinner=False)
 def ws(name):
-    """Get a worksheet, creating it with headers if missing (except core sheets)."""
+    # Get a worksheet, creating it with headers if missing (except core sheets).
+    # Cached: sh.worksheet() does a full fetch_sheet_metadata() call, so an
+    # uncached ws() spends one API read *per call* — with 14 sheets and several
+    # get_df/append_row per render that alone exhausted the read quota (429).
     sh = get_sheet()
     try:
         return sh.worksheet(name)
@@ -65,28 +69,30 @@ def ws(name):
         w.append_row(headers)
         return w
 
+@st.cache_data(ttl=300, show_spinner=False)
+def sheet_headers(name):
+    # Header row rarely changes; caching it saves a read on every write.
+    return ws(name).row_values(1)
+
 @st.cache_data(ttl=15, show_spinner=False)
 def get_df(name):
-    w = ws(name)
-    data = w.get_all_records()
+    data = ws(name).get_all_records()
     if not data:
         # empty sheet: keep the real columns so downstream df["col"]
         # filters don't KeyError
-        headers = w.row_values(1)
-        return pd.DataFrame(columns=headers)
+        return pd.DataFrame(columns=sheet_headers(name))
     return pd.DataFrame(data)
 
 def append_row(name, row_dict):
     """Append a row, aligning values to the sheet's existing header order."""
-    w = ws(name)
-    headers = w.row_values(1)
+    headers = sheet_headers(name)
     row = [row_dict.get(h, "") for h in headers]
-    w.append_row(row, value_input_option="USER_ENTERED")
+    ws(name).append_row(row, value_input_option="USER_ENTERED")
     get_df.clear()  # invalidate cache so the new row shows immediately
 
 def update_cell_by_key(name, key_col, key_val, target_col, value):
     w = ws(name)
-    headers = w.row_values(1)
+    headers = sheet_headers(name)
     key_idx = headers.index(key_col) + 1
     target_idx = headers.index(target_col) + 1
     cell = w.find(str(key_val), in_column=key_idx)
@@ -618,7 +624,7 @@ if page == "📦 Inventory":
         )
         if st.button("💾 ცვლილებების შენახვა"):
             w = ws("INVENTORY")
-            headers = w.row_values(1)
+            headers = sheet_headers("INVENTORY")
             full = df.copy()
             full.update(edited)
             values = [headers] + full[headers].astype(str).values.tolist()
