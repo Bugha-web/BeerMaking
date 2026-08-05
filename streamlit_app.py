@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "v13 · 2026-08-06 · ტაბები + ქეშის fix"
+APP_VERSION = "v14 · 2026-08-06 · ხარშვების დალაგება"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -728,12 +728,19 @@ elif page == "🍺 ხარშვა":
     # dropdown shows Display_Name, internally maps back to Brew_ID
     label_to_bid = {}
     if not headers_df.empty:
+        entries = []
         for _, hr in headers_df.iterrows():
             dn = str(hr.get("Display_Name", "") or "").strip()
             lab = dn if dn and dn.lower() != "nan" else str(hr["Brew_ID"])
+            entries.append((parse_brew_number(dn), lab, hr["Brew_ID"]))
+        # order by the number in the name, not by sheet row — a brew inserted
+        # in the middle (e.g. ხარშვა 9) is appended to the sheet but belongs
+        # in its numbered position. Unnumbered names go last, alphabetically.
+        entries.sort(key=lambda e: (e[0] is None, e[0] if e[0] is not None else 0, e[1]))
+        for _num_, lab, bid_ in entries:
             if lab in label_to_bid:  # guard against duplicate names
-                lab = f"{lab} ({str(hr['Brew_ID'])[-4:]})"
-            label_to_bid[lab] = hr["Brew_ID"]
+                lab = f"{lab} ({str(bid_)[-4:]})"
+            label_to_bid[lab] = bid_
     choice = st.selectbox("აირჩიე ხარშვა ან შექმენი ახალი",
                           ["➕ ახალი ხარშვა"] + list(label_to_bid.keys()))
 
