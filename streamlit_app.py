@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "v12 · 2026-08-06 · სისწრაფე (batch + ფორმები)"
+APP_VERSION = "v13 · 2026-08-06 · ტაბები + ქეშის fix"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -120,12 +120,20 @@ def get_df(name):
             df[c] = conv
     return df
 
+def invalidate_cache():
+    # get_df is built from the batched _all_sheet_values snapshot, so clearing
+    # get_df alone left writes invisible until the 15s TTL expired — the save
+    # looked like it had done nothing. Clear the whole chain.
+    get_df.clear()
+    _all_sheet_values.clear()
+    sheet_headers.clear()
+
 def append_row(name, row_dict):
     """Append a row, aligning values to the sheet's existing header order."""
     headers = sheet_headers(name)
     row = [row_dict.get(h, "") for h in headers]
     ws(name).append_row(row, value_input_option="USER_ENTERED")
-    get_df.clear()  # invalidate cache so the new row shows immediately
+    invalidate_cache()
 
 def update_cell_by_key(name, key_col, key_val, target_col, value):
     w = ws(name)
@@ -135,7 +143,7 @@ def update_cell_by_key(name, key_col, key_val, target_col, value):
     cell = w.find(str(key_val), in_column=key_idx)
     if cell:
         w.update_cell(cell.row, target_idx, value)
-        get_df.clear()  # invalidate cache so the change shows immediately
+        invalidate_cache()
         return True
     return False
 
@@ -241,7 +249,7 @@ def set_client_price(client_id, product_id, price):
         if len(rowv) > max(ci, pi) and rowv[ci] == client_id and rowv[pi] == product_id:
             w.update_cell(ridx, pr + 1, price)
             w.update_cell(ridx, di + 1, str(date.today()))
-            get_df.clear()
+            invalidate_cache()
             return
     append_row("CLIENT_PRICES", {"Client_ID": client_id, "Product_ID": product_id,
                                  "Price_GEL_per_L": price, "Updated_Date": str(date.today())})
@@ -284,7 +292,7 @@ def shift_brew_numbers_from(n):
     for ridx, newname in sorted(updates, reverse=True):
         w.update_cell(ridx, di + 1, newname)
     if updates:
-        get_df.clear()
+        invalidate_cache()
     return len(updates)
 
 def log_change(action, details="", bid="", brew_name="", day=""):
@@ -380,7 +388,7 @@ def delete_rows_where(sheet_name, col_name, value):
     for i in reversed(idxs):
         w.delete_rows(i)
     if idxs:
-        get_df.clear()
+        invalidate_cache()
     return len(idxs)
 
 def is_brew_finished(brew_id, headers_df):
@@ -406,7 +414,7 @@ def close_brew_day(bid, day, closed=True):
     """Mark a brew day closed/open in BREW_HEADER."""
     update_cell_by_key("BREW_HEADER", "Brew_ID", bid, f"Day{int(day)}_Closed",
                        "1" if closed else "")
-    get_df.clear()
+    invalidate_cache()
 
 def delete_day_rows(sheet, bid, day, category=None):
     # Delete rows for Brew_ID + Brew_Day (optionally + Category) so a day's
@@ -427,7 +435,7 @@ def delete_day_rows(sheet, bid, day, category=None):
     for i in reversed(idxs):
         w.delete_rows(i)
     if idxs:
-        get_df.clear()
+        invalidate_cache()
     return len(idxs)
 
 def water_defaults_for_day(bid, day, fallback):
@@ -536,7 +544,7 @@ def update_step_qty(bid, category, item, new_qty, timing=None, brew_day=None):
                 and (ti is None or (len(rowv) > ti and rowv[ti] == str(timing)))
                 and (di is None or (len(rowv) > di and rowv[di] == str(brew_day)))):
             w.update_cell(ridx, qi + 1, new_qty)
-            get_df.clear()
+            invalidate_cache()
             return True
     return False
 
@@ -667,7 +675,7 @@ if page == "📦 Inventory":
             values = [headers] + full[headers].astype(str).values.tolist()
             w.clear()
             w.update(values)
-            get_df.clear()
+            invalidate_cache()
             log_change("მარაგის ცხრილი შესწორდა", f"{len(full)} row გადაიწერა")
             flash("შენახულია.")
             st.rerun()
@@ -705,7 +713,7 @@ if page == "📦 Inventory":
                                   key="inv_del_confirm")
             if st.button("წაშლა", key="inv_del_btn") and confirm:
                 n = delete_rows_where("INVENTORY", "Item", item_to_delete)
-                get_df.clear()
+                invalidate_cache()
                 log_change("🗑️ ნედლეული წაიშალა", f"{item_to_delete} ({n} row)")
                 flash(f"წაშლილია ({n} row).")
                 st.rerun()
@@ -846,16 +854,12 @@ elif page == "🍺 ხარშვა":
                     st.rerun()
 
         BREW_TABS = ["📊 მიმოხილვა", "💧 წყალი", "🌾 მეშინგი", "🔥 დუღილი (boil/hop)", "🧪 ფერმენტაცია/Gravity"]
-        if "brew_tab" not in st.session_state:
-            st.session_state.brew_tab = "📊 მიმოხილვა"
-        st.session_state.brew_tab = st.radio(
-            "ტაბი", BREW_TABS,
-            horizontal=True, label_visibility="collapsed", key="brew_tab_radio",
-            index=BREW_TABS.index(st.session_state.brew_tab)
-        )
+        st.session_state.setdefault("brew_tab_radio", BREW_TABS[0])
+        brew_tab = st.radio("ტაბი", BREW_TABS, horizontal=True,
+                            label_visibility="collapsed", key="brew_tab_radio")
 
         # ---- OVERVIEW TAB ----
-        if st.session_state.brew_tab == "📊 მიმოხილვა":
+        if brew_tab == "📊 მიმოხილვა":
             fg_confirmed = str(row.get("FG_Date", "")).strip() not in ("", "nan", "None")
 
             def _show(v):
@@ -1033,7 +1037,7 @@ elif page == "🍺 ხარშვა":
                         for sheet in ["BREW_STEPS", "WATER_TREATMENT",
                                       "BREW_GRAVITY_LOG", "BREW_HEADER"]:
                             deleted[sheet] = delete_rows_where(sheet, "Brew_ID", bid)
-                        get_df.clear()
+                        invalidate_cache()
                         log_change("🗑️ ხარშვა წაიშალა",
                                    ", ".join(f"{s} −{n}" for s, n in deleted.items()),
                                    bid=bid, brew_name=brew_display)
@@ -1042,7 +1046,7 @@ elif page == "🍺 ხარშვა":
                         st.rerun()
 
         # ---- WATER TAB ----
-        if st.session_state.brew_tab == "💧 წყალი":
+        if brew_tab == "💧 წყალი":
             locked = (lock_gate(row.get("FG_Date"), f"edit_ovr_water_{bid}") if fg_done else False) or day_locked
             water_day = brew_day
             profiles_df = get_df("WATER_PROFILES")
@@ -1195,7 +1199,7 @@ elif page == "🍺 ხარშვა":
                              use_container_width=True)
 
         # ---- MASH TAB ----
-        if st.session_state.brew_tab == "🌾 მეშინგი":
+        if brew_tab == "🌾 მეშინგი":
             locked = (lock_gate(row.get("FG_Date"), f"edit_ovr_mash_{bid}") if fg_done else False) or day_locked
             st.caption("[Certain] mash schedule ხარშვიდან ხარშვამდე იცვლება — ამიტომ ყოველთვის ხელით.")
             st.markdown(f"**საფეხურები — დღე {brew_day}** _(დღე 2 default-ად დღე 1-ის "
@@ -1356,7 +1360,7 @@ elif page == "🍺 ხარშვა":
                 st.dataframe(mash_view, use_container_width=True)
 
         # ---- BOIL / HOP TAB ----
-        if st.session_state.brew_tab == "🔥 დუღილი (boil/hop)":
+        if brew_tab == "🔥 დუღილი (boil/hop)":
             # day lock covers the hop list (per-day); the boil header below is
             # brew-level and stays governed by the FG lock only
             fg_locked = lock_gate(row.get("FG_Date"), f"edit_ovr_boil_{bid}") if fg_done else False
@@ -1518,7 +1522,7 @@ elif page == "🍺 ხარშვა":
                 st.dataframe(boil_view, use_container_width=True)
 
         # ---- FERMENT / GRAVITY TAB ----
-        if st.session_state.brew_tab == "🧪 ფერმენტაცია/Gravity":
+        if brew_tab == "🧪 ფერმენტაცია/Gravity":
             locked = lock_gate(row.get("FG_Date"), f"edit_ovr_ferm_{bid}") if fg_done else False
 
             # --- yeast pitch: which yeast, dry vs slurry, + reuse generation ---
@@ -1663,14 +1667,15 @@ else:
 
     CL_TABS = ["📋 მიმოხილვა", "👤 კლიენტის ბარათი", "🚚 გატანა",
                "💰 გადახდა", "📦 ინვენტარი", "⚙️ კლიენტები/პროდუქტები"]
-    if "cl_tab" not in st.session_state:
-        st.session_state.cl_tab = "📋 მიმოხილვა"
-    st.session_state.cl_tab = st.radio(
-        "ტაბი", CL_TABS, horizontal=True, label_visibility="collapsed",
-        key="cl_tab_radio", index=CL_TABS.index(st.session_state.cl_tab))
+    # single source of truth: the widget's own key. Mirroring it into another
+    # session_state variable AND passing index= made the radio lag one render
+    # behind, so a tab switch needed two or three clicks.
+    st.session_state.setdefault("cl_tab_radio", CL_TABS[0])
+    cl_tab = st.radio("ტაბი", CL_TABS, horizontal=True,
+                      label_visibility="collapsed", key="cl_tab_radio")
 
     # ---------------- OVERVIEW ----------------
-    if st.session_state.cl_tab == "📋 მიმოხილვა":
+    if cl_tab == "📋 მიმოხილვა":
         if not cl_map:
             st.info("კლიენტი ჯერ არ არის დამატებული — იხ. ტაბი „⚙️ კლიენტები/პროდუქტები“.")
         else:
@@ -1701,7 +1706,7 @@ else:
             st.dataframe(ov, use_container_width=True, hide_index=True)
 
     # ---------------- CLIENT CARD ----------------
-    elif st.session_state.cl_tab == "👤 კლიენტის ბარათი":
+    elif cl_tab == "👤 კლიენტის ბარათი":
         if not cl_map:
             st.info("ჯერ დაამატე კლიენტი.")
         else:
@@ -1758,7 +1763,7 @@ else:
                                  use_container_width=True, hide_index=True)
 
     # ---------------- SHIPMENT ----------------
-    elif st.session_state.cl_tab == "🚚 გატანა":
+    elif cl_tab == "🚚 გატანა":
         if not cl_map or not pr_map:
             st.info("ჯერ დაამატე კლიენტი და პროდუქტი („⚙️“ ტაბი).")
         else:
@@ -1851,7 +1856,7 @@ else:
                 st.rerun()
 
     # ---------------- PAYMENT ----------------
-    elif st.session_state.cl_tab == "💰 გადახდა":
+    elif cl_tab == "💰 გადახდა":
         if not cl_map:
             st.info("ჯერ დაამატე კლიენტი.")
         else:
@@ -1885,7 +1890,7 @@ else:
                 st.rerun()
 
     # ---------------- ASSETS ----------------
-    elif st.session_state.cl_tab == "📦 ინვენტარი":
+    elif cl_tab == "📦 ინვენტარი":
         if not cl_map:
             st.info("ჯერ დაამატე კლიენტი.")
         else:
