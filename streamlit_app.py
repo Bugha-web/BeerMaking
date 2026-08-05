@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "2026-08-04 · v11 (quota fix — ws კეშირება)"
+APP_VERSION = "2026-08-04 · v12 (სისწრაფე: batch + ფორმები)"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -39,6 +39,15 @@ if _css:
 # ============================================================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
           "https://www.googleapis.com/auth/drive"]
+
+def flash(msg):
+    # st.success() immediately before st.rerun() is discarded — the rerun wipes
+    # it before it ever paints. Queue it instead and show it after the rerun.
+    st.session_state["_flash"] = str(msg)
+
+_flash_msg = st.session_state.pop("_flash", None)
+if _flash_msg:
+    st.toast(_flash_msg, icon="✅")
 
 @st.cache_resource
 def get_client():
@@ -69,19 +78,47 @@ def ws(name):
         w.append_row(headers)
         return w
 
+@st.cache_data(ttl=15, show_spinner=False)
+def _all_sheet_values():
+    # ONE batched read of every worksheet. Reading sheets one by one cost ~3s
+    # per rerun (a call each); batched it is ~0.9s total, and every get_df in
+    # the same rerun is then served from this single response.
+    sh = get_sheet()
+    names = [w.title for w in sh.worksheets()]
+    resp = sh.values_batch_get([f"'{n}'!A1:AZ5000" for n in names])
+    out = {}
+    for name, vr in zip(names, resp.get("valueRanges", [])):
+        out[name] = vr.get("values", [])
+    return out
+
 @st.cache_data(ttl=300, show_spinner=False)
 def sheet_headers(name):
     # Header row rarely changes; caching it saves a read on every write.
-    return ws(name).row_values(1)
+    rows = _all_sheet_values().get(name) or []
+    return rows[0] if rows else ws(name).row_values(1)
 
 @st.cache_data(ttl=15, show_spinner=False)
 def get_df(name):
-    data = ws(name).get_all_records()
-    if not data:
+    rows = _all_sheet_values().get(name) or []
+    if not rows:
+        return pd.DataFrame()
+    headers = rows[0]
+    body = []
+    for r in rows[1:]:
+        r = list(r) + [""] * (len(headers) - len(r))   # batch_get trims blanks
+        body.append(r[:len(headers)])
+    if not body:
         # empty sheet: keep the real columns so downstream df["col"]
         # filters don't KeyError
-        return pd.DataFrame(columns=sheet_headers(name))
-    return pd.DataFrame(data)
+        return pd.DataFrame(columns=headers)
+    df = pd.DataFrame(body, columns=headers)
+    # values arrive as strings; restore numeric dtypes so existing arithmetic
+    # and sorting behave exactly as they did with get_all_records()
+    for c in df.columns:
+        conv = pd.to_numeric(df[c], errors="coerce")
+        if conv.notna().all() and (df[c].astype(str).str.strip() != "").all():
+            df[c] = conv
+    return df
 
 def append_row(name, row_dict):
     """Append a row, aligning values to the sheet's existing header order."""
@@ -632,7 +669,7 @@ if page == "📦 Inventory":
             w.update(values)
             get_df.clear()
             log_change("მარაგის ცხრილი შესწორდა", f"{len(full)} row გადაიწერა")
-            st.success("შენახულია.")
+            flash("შენახულია.")
             st.rerun()
 
     st.divider()
@@ -656,7 +693,7 @@ if page == "📦 Inventory":
                 "AA_%_if_hop": aa, "EBC": ebc, "Low_Threshold": low,
                 "Received_Date": str(date.today()), "Notes": notes,
             })
-            st.success(f"{item} დაემატა.")
+            flash(f"{item} დაემატა.")
             st.rerun()
 
     if not df.empty:
@@ -670,7 +707,7 @@ if page == "📦 Inventory":
                 n = delete_rows_where("INVENTORY", "Item", item_to_delete)
                 get_df.clear()
                 log_change("🗑️ ნედლეული წაიშალა", f"{item_to_delete} ({n} row)")
-                st.success(f"წაშლილია ({n} row).")
+                flash(f"წაშლილია ({n} row).")
                 st.rerun()
 
 # ============================================================
@@ -735,7 +772,7 @@ elif page == "🍺 ხარშვა":
                 log_change("ხარშვა შეიქმნა",
                            f"{display_name}" + (f" (ჩასმა — {shifted} ხარშვა გადაინომრა)" if shifted else ""),
                            bid=bid, brew_name=display_name)
-                st.success(f"ხარშვა შეიქმნა: {display_name} ({bid})."
+                flash(f"ხარშვა შეიქმნა: {display_name} ({bid})."
                            + (f" {shifted} ხარშვა გადაინომრა." if shifted else "")
                            + " აირჩიე ის ზემოთა სიიდან რომ დეტალები შეავსო.")
                 st.rerun()
@@ -783,7 +820,7 @@ elif page == "🍺 ხარშვა":
                         close_brew_day(bid, brew_day, closed=False)
                         log_change("დღე გაიხსნა", f"დღე {brew_day}", bid=bid,
                                    brew_name=choice, day=brew_day)
-                        st.success(f"დღე {brew_day} გაიხსნა.")
+                        flash(f"დღე {brew_day} გაიხსნა.")
                         st.rerun()
             elif day2_blocked:
                 st.warning("დღე 2 ჯერ დაბლოკილია — ჯერ დაასრულე და დახურე დღე 1.")
@@ -791,7 +828,7 @@ elif page == "🍺 ხარშვა":
                     close_brew_day(bid, 1, closed=True)
                     log_change("დღე დაიხურა", "დღე 1 (დღე 2-ზე გადასვლისას)",
                                bid=bid, brew_name=choice, day=1)
-                    st.success("დღე 1 დაიხურა — დღე 2 გაიხსნა.")
+                    flash("დღე 1 დაიხურა — დღე 2 გაიხსნა.")
                     st.rerun()
                 if st.checkbox("🔓 მაინც მინდა დღე 2-ის შევსება (დღე 1-ის დახურვის გარეშე)",
                                key=f"day2_override_{bid}"):
@@ -1000,7 +1037,7 @@ elif page == "🍺 ხარშვა":
                         log_change("🗑️ ხარშვა წაიშალა",
                                    ", ".join(f"{s} −{n}" for s, n in deleted.items()),
                                    bid=bid, brew_name=brew_display)
-                        st.success("წაშლილია: " + ", ".join(
+                        flash("წაშლილია: " + ", ".join(
                             f"{s} −{n}" for s, n in deleted.items()))
                         st.rerun()
 
@@ -1029,25 +1066,29 @@ elif page == "🍺 ხარშვა":
             # per-day pre-fill: saved day-N values, else day-1 values, else profile
             wd = water_defaults_for_day(bid, water_day, defaults)
 
-            st.markdown(f"**Mash წყალი** — დღე {water_day}")
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m_vol = m1.number_input("მოცულობა (L)", min_value=0.0, value=float(wd["Mash"]["vol"] or 0), key=f"m_vol_{water_day}", disabled=locked)
-            m_gyp = m2.number_input("Gypsum (g)", value=float(wd["Mash"]["gyp"] or 0), key=f"m_gyp_{water_day}", disabled=locked)
-            m_cacl = m3.number_input("CaCl2 (g)", value=float(wd["Mash"]["cacl2"] or 0), key=f"m_cacl_{water_day}", disabled=locked)
-            m_lac = m4.number_input("Lactic (ml)", value=float(wd["Mash"]["lac"] or 0), key=f"m_lac_{water_day}", disabled=locked)
-            m_ph = m5.number_input("Target pH", value=float(wd["Mash"]["ph"] or 5.3), key=f"m_ph_{water_day}", disabled=locked)
+            with st.form(f"water_form_{water_day}"):
+                st.markdown(f"**Mash წყალი** — დღე {water_day}")
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m_vol = m1.number_input("მოცულობა (L)", min_value=0.0, value=float(wd["Mash"]["vol"] or 0), disabled=locked)
+                m_gyp = m2.number_input("Gypsum (g)", value=float(wd["Mash"]["gyp"] or 0), disabled=locked)
+                m_cacl = m3.number_input("CaCl2 (g)", value=float(wd["Mash"]["cacl2"] or 0), disabled=locked)
+                m_lac = m4.number_input("Lactic (ml)", value=float(wd["Mash"]["lac"] or 0), disabled=locked)
+                m_ph = m5.number_input("Target pH", value=float(wd["Mash"]["ph"] or 5.3), disabled=locked)
 
-            st.markdown(f"**Sparge წყალი** — დღე {water_day}")
-            s1, s2, s3, s4, s5 = st.columns(5)
-            s_vol = s1.number_input("მოცულობა (L)", value=float(wd["Sparge"]["vol"] or 1000), key=f"s_vol_{water_day}", disabled=locked)
-            s_gyp = s2.number_input("Gypsum (g)", value=float(wd["Sparge"]["gyp"] or 0), key=f"s_gyp_{water_day}", disabled=locked)
-            s_cacl = s3.number_input("CaCl2 (g)", value=float(wd["Sparge"]["cacl2"] or 0), key=f"s_cacl_{water_day}", disabled=locked)
-            s_lac = s4.number_input("Lactic (ml)", value=float(wd["Sparge"]["lac"] or 0), key=f"s_lac_{water_day}", disabled=locked)
-            s_ph = s5.number_input("Target pH", value=float(wd["Sparge"]["ph"] or 5.7), key=f"s_ph_{water_day}", disabled=locked)
+                st.markdown(f"**Sparge წყალი** — დღე {water_day}")
+                s1, s2, s3, s4, s5 = st.columns(5)
+                s_vol = s1.number_input("მოცულობა (L)", value=float(wd["Sparge"]["vol"] or 1000), disabled=locked)
+                s_gyp = s2.number_input("Gypsum (g)", value=float(wd["Sparge"]["gyp"] or 0), disabled=locked)
+                s_cacl = s3.number_input("CaCl2 (g)", value=float(wd["Sparge"]["cacl2"] or 0), disabled=locked)
+                s_lac = s4.number_input("Lactic (ml)", value=float(wd["Sparge"]["lac"] or 0), disabled=locked)
+                s_ph = s5.number_input("Target pH", value=float(wd["Sparge"]["ph"] or 5.7), disabled=locked)
+                water_confirm = st.checkbox("დიახ, უჩვეულო მონაცემიც სწორია", disabled=locked)
+                water_submit = st.form_submit_button(
+                    f"💾 წყლის მონაცემის შენახვა (დღე {water_day})", disabled=locked)
 
             tgt = _num(row.get("Target_Vol_L"), SANITY["vol_target"]) or SANITY["vol_target"]
             lo, hi = tgt * (1 - SANITY["vol_tolerance"]), tgt * (1 + SANITY["vol_tolerance"])
-            water_ok = sanity_gate([
+            water_problems = [m for bad, m in [
                 (m_vol and not (lo <= m_vol <= hi),
                  f"Mash მოცულობა {m_vol:g} L — სამიზნეს ({tgt:g} L) 30%-ზე მეტით სცდება."),
                 (s_vol > SANITY["sparge_max"],
@@ -1062,9 +1103,12 @@ elif page == "🍺 ხარშვა":
                  f"Mash pH {m_ph:g} — რეალურ დიაპაზონს ({SANITY['ph_min']}–{SANITY['ph_max']}) სცდება."),
                 (s_ph and not (SANITY["ph_min"] <= s_ph <= SANITY["ph_max"]),
                  f"Sparge pH {s_ph:g} — რეალურ დიაპაზონს სცდება."),
-            ], key=f"sanity_water_{bid}_{water_day}")
-            if st.button(f"💾 წყლის მონაცემის შენახვა (დღე {water_day})",
-                         disabled=locked or not water_ok):
+            ] if bad]
+            if water_submit and water_problems and not water_confirm:
+                for m in water_problems:
+                    st.warning(f"⚠️ {m}")
+                st.error("დაადასტურე ფორმაში („უჩვეულო მონაცემიც სწორია“) და ხელახლა შეინახე.")
+            elif water_submit:
                 # salt auto-deduction: total need across Mash+Sparge, in grams.
                 # Only NEW saves deduct — existing WATER_TREATMENT rows are
                 # never touched retroactively.
@@ -1142,7 +1186,7 @@ elif page == "🍺 ხარშვა":
                 append_row("WATER_PROFILES", {"Profile_Name": new_profile_name, "Stream": "Sparge",
                     "Volume_L_Default": s_vol, "Gypsum_g": s_gyp, "CaCl2_g": s_cacl,
                     "Lactic_ml": s_lac, "Target_pH": s_ph})
-                st.success(f"პროფილი '{new_profile_name}' შენახულია.")
+                flash(f"პროფილი '{new_profile_name}' შენახულია.")
                 st.rerun()
 
             existing_water = get_df("WATER_TREATMENT")
@@ -1205,7 +1249,7 @@ elif page == "🍺 ხარშვა":
                                "; ".join(f"{_num(t):g}°C/{int(_num(d))}წთ" for _, t, d, _n in to_save)
                                or "(ცარიელი)",
                                bid=bid, brew_name=choice, day=brew_day)
-                    st.success(f"დღე {brew_day}: {len(to_save)} საფეხური შენახულია.")
+                    flash(f"დღე {brew_day}: {len(to_save)} საფეხური შენახულია.")
                     st.rerun()
 
             st.markdown("**ალაოს ჩამონათვალი (grain bill)**")
@@ -1228,15 +1272,18 @@ elif page == "🍺 ხარშვა":
                              f"'{malt_inv_unit}' — ჩამოჭრა ვერ გამოითვლება. "
                              f"გაასწორე ამ item-ის ერთეული INVENTORY-ში.")
                 malt_day = brew_day
-                c1, c3 = st.columns([2, 2])
-                malt_qty = c1.number_input(
-                    f"რაოდენობა (kg) — მარაგში {malt_cap:g} kg" if malt_cap is not None
-                    else "რაოდენობა (kg)",
-                    min_value=0.0,
-                    # historical entries may exceed today's stock — no cap then
-                    max_value=malt_cap if (malt_cap and malt_cap > 0 and not hist_mode) else None,
-                    key="malt_qty", disabled=locked)
-                malt_just = c3.text_input("დასაბუთება", key="malt_just", disabled=locked)
+                with st.form(f"malt_form_{brew_day}", clear_on_submit=True):
+                    c1, c3 = st.columns([2, 2])
+                    malt_qty = c1.number_input(
+                        f"რაოდენობა (kg) — მარაგში {malt_cap:g} kg" if malt_cap is not None
+                        else "რაოდენობა (kg)",
+                        min_value=0.0,
+                        # historical entries may exceed today's stock — no cap then
+                        max_value=malt_cap if (malt_cap and malt_cap > 0 and not hist_mode) else None,
+                        disabled=locked)
+                    malt_just = c3.text_input("დასაბუთება", disabled=locked)
+                    malt_confirm = st.checkbox("დიახ, უჩვეულო რაოდენობაც სწორია", disabled=locked)
+                    malt_submit = st.form_submit_button("დამატება (ალაო)", disabled=locked)
                 malt_deduct = convert_to_inventory_unit(malt_qty, "kg", malt_inv_unit)
                 # duplicate = same Brew_ID+Category+Item AND same brew day —
                 # day 1 and day 2 of the same malt stay separate rows
@@ -1259,12 +1306,14 @@ elif page == "🍺 ხარშვა":
                     else:
                         st.caption(f"დღე {malt_day} · მარაგიდან ჩამოეჭრება: "
                                    f"{malt_deduct:g} {malt_inv_unit}")
-                malt_ok = sanity_gate([
-                    (malt_qty > SANITY["grain_max_kg"],
-                     f"ალაო {malt_qty:g} kg — ერთ დღეზე {SANITY['grain_max_kg']:g} kg-ზე მეტია. "
-                     f"შესაძლოა ერთეული აგერიოს (g ↔ kg)?"),
-                ], key=f"sanity_malt_{bid}_{brew_day}")
-                if st.button("დამატება (ალაო)", disabled=locked or not malt_ok) and malt_qty > 0:
+                malt_odd = malt_qty > SANITY["grain_max_kg"]
+                if malt_submit and malt_qty <= 0:
+                    st.error("შეავსე რაოდენობა.")
+                elif malt_submit and malt_odd and not malt_confirm:
+                    st.warning(f"⚠️ ალაო {malt_qty:g} kg — ერთ დღეზე "
+                               f"{SANITY['grain_max_kg']:g} kg-ზე მეტია. ერთეული ხომ არ აგერია (g ↔ kg)?")
+                    st.error("დაადასტურე ფორმაში და ხელახლა შეინახე.")
+                elif malt_submit:
                     if not hist_mode and malt_deduct is None:
                         st.error("ერთეულები შეუთავსებელია — ჩანაწერი არ შენახულა, "
                                  "ჩამოჭრა არ მომხდარა.")
@@ -1332,25 +1381,29 @@ elif page == "🍺 ხარშვა":
                     st.error(f"ერთეულები შეუთავსებელია: ფორმაში g, მარაგში "
                              f"'{hop_inv_unit}' — ჩამოჭრა ვერ გამოითვლება. "
                              f"გაასწორე ამ item-ის ერთეული INVENTORY-ში.")
-                c1, c2, c3 = st.columns(3)
-                hop_qty = c1.number_input(
-                    f"რაოდენობა (g) — მარაგში {hop_cap:g} g" if hop_cap is not None
-                    else "რაოდენობა (g)",
-                    min_value=0.0,
-                    # historical entries may exceed today's stock — no cap then
-                    max_value=hop_cap if (hop_cap and hop_cap > 0 and not hist_mode) else None,
-                    key="hop_qty", disabled=locked)
-                hop_timing_sel = c2.selectbox(
-                    "დრო", ["60წთ", "30წთ", "15წთ", "5წთ", "0", "Whirlpool", "სხვა"],
-                    key="hop_timing", disabled=locked)
-                c3.text_input("AA% (INVENTORY-დან)", value=hop_aa, disabled=True, key="hop_aa_display")
-                if hop_timing_sel == "სხვა":
-                    hop_timing = st.text_input("დრო — ხელით (მაგ. 45წთ, 20წთ)",
-                                               key="hop_timing_custom", disabled=locked).strip()
-                else:
-                    hop_timing = hop_timing_sel
+                with st.form(f"hop_form_{brew_day}", clear_on_submit=True):
+                    c1, c2, c3 = st.columns(3)
+                    hop_qty = c1.number_input(
+                        f"რაოდენობა (g) — მარაგში {hop_cap:g} g" if hop_cap is not None
+                        else "რაოდენობა (g)",
+                        min_value=0.0,
+                        # historical entries may exceed today's stock — no cap then
+                        max_value=hop_cap if (hop_cap and hop_cap > 0 and not hist_mode) else None,
+                        disabled=locked)
+                    hop_timing_sel = c2.selectbox(
+                        "დრო", ["60წთ", "30წთ", "15წთ", "5წთ", "0", "Whirlpool", "სხვა"],
+                        disabled=locked)
+                    c3.text_input("AA% (INVENTORY-დან)", value=hop_aa, disabled=True,
+                                  key="hop_aa_display")
+                    hop_timing_custom = st.text_input(
+                        "დრო — ხელით (თუ „სხვა“ აირჩიე, მაგ. 45წთ)", disabled=locked)
+                    hop_just = st.text_input("დასაბუთება", disabled=locked)
+                    hop_confirm = st.checkbox("დიახ, უჩვეულო რაოდენობაც სწორია", disabled=locked)
+                    hop_submit = st.form_submit_button("დამატება (ჰოპი)", disabled=locked)
+
+                hop_timing = (hop_timing_custom.strip() if hop_timing_sel == "სხვა"
+                              else hop_timing_sel)
                 hop_day = brew_day
-                hop_just = st.text_input("დასაბუთება", key="hop_just", disabled=locked)
                 hop_deduct = convert_to_inventory_unit(hop_qty, "g", hop_inv_unit)
                 # true duplicate for hops = same Brew_ID+Category+Item AND Timing
                 # AND brew day. Same hop at another timing OR another day is a
@@ -1375,12 +1428,14 @@ elif page == "🍺 ხარშვა":
                     else:
                         st.caption(f"დღე {hop_day} · მარაგიდან ჩამოეჭრება: "
                                    f"{hop_deduct:g} {hop_inv_unit}")
-                hop_ok = sanity_gate([
-                    (hop_qty > SANITY["hop_max_g"],
-                     f"სვია {hop_qty:g} g — ერთ დამატებაზე {SANITY['hop_max_g']:g} g-ზე მეტია. "
-                     f"შესაძლოა ერთეული აგერიოს (g ↔ kg)?"),
-                ], key=f"sanity_hop_{bid}_{brew_day}")
-                if st.button("დამატება (ჰოპი)", disabled=locked or not hop_ok) and hop_qty > 0:
+                hop_odd = hop_qty > SANITY["hop_max_g"]
+                if hop_submit and hop_qty <= 0:
+                    st.error("შეავსე რაოდენობა.")
+                elif hop_submit and hop_odd and not hop_confirm:
+                    st.warning(f"⚠️ სვია {hop_qty:g} g — ერთ დამატებაზე "
+                               f"{SANITY['hop_max_g']:g} g-ზე მეტია. ერთეული ხომ არ აგერია (g ↔ kg)?")
+                    st.error("დაადასტურე ფორმაში და ხელახლა შეინახე.")
+                elif hop_submit:
                     if not str(hop_timing).strip():
                         st.error("შეავსე Timing (ხელით არჩეულ „სხვა“-ზე ცარიელია).")
                     elif not hist_mode and hop_deduct is None:
@@ -1454,7 +1509,7 @@ elif page == "🍺 ხარშვა":
                            f"PreBoil {pre_boil_vol:g}L/{pre_boil_p:g}°P, "
                            f"PostBoil {post_boil_vol:g}L, OG {actual_og:g}°P",
                            bid=bid, brew_name=choice)
-                st.success("შენახულია.")
+                flash("შენახულია.")
                 st.rerun()
 
             steps_df = get_df("BREW_STEPS")
@@ -1503,7 +1558,7 @@ elif page == "🍺 ხარშვა":
                 log_change("საფუარი", f"{yeast_name} · {form_val}"
                            + (f" · თაობა {int(yeast_gen)}" if is_slurry else ""),
                            bid=bid, brew_name=choice)
-                st.success(f"საფუარი შენახულია: {yeast_name} ({form_val}"
+                flash(f"საფუარი შენახულია: {yeast_name} ({form_val}"
                            + (f", თაობა {int(yeast_gen)}" if is_slurry else "") + ").")
                 st.rerun()
             st.divider()
@@ -1720,51 +1775,50 @@ else:
             k2.metric(f"{cname}-თან ახლა", f"{held_now:g}")
 
             cur_price = client_price(cid, pid, get_df("CLIENT_PRICES"), products_df)
-            c3, c4, c5 = st.columns(3)
-            s_date = c3.date_input("თარიღი", value=date.today(), key="sh_date")
-            kegs = c4.number_input(f"წაიღო სავსე კეგი (×{ksize:g}ლ)", min_value=0, step=1,
-                                   key="sh_kegs")
-            price = c5.number_input("ფასი ₾/ლ", min_value=0.0, step=0.1,
-                                    value=float(cur_price), key="sh_price")
-            vol = kegs * ksize
-            total = round(vol * price, 2)
-
-            c6, c7 = st.columns(2)
-            kegs_back = c6.number_input("დააბრუნა ცარიელი კეგი", min_value=0, step=1,
-                                        key="sh_kegs_back")
-            # never assume payment: the debt is created by default and any
-            # payment is entered explicitly
-            paid_now = c7.number_input("ახლა გადაიხადა (₾)", min_value=0.0, step=1.0,
-                                       value=0.0, key="sh_paid")
-            note = st.text_input("შენიშვნა", key="sh_note")
-
-            st.markdown(f"### {kegs} კეგი × {ksize:g}ლ = **{vol:g} ლ** × {price:g} ₾ "
-                        f"= **{total:g} ₾**")
-            if paid_now < total:
-                st.warning(f"დავალიანებას დაემატება: **{total - paid_now:g} ₾**")
-            elif total > 0:
-                st.success("სრულად გადახდილი — დავალიანება არ იქმნება.")
-            net = kegs - kegs_back
-            st.caption(f"კეგები: −{kegs} გატანა, +{kegs_back} დაბრუნება → "
-                       f"{cname}-თან იქნება **{held_now + net:g}**, "
-                       f"ქარხანაში **{free_now - net:g}**")
-            price_changed = abs(price - cur_price) > 1e-9 and cur_price > 0
-            save_price = False
-            if price_changed:
+            # in a form, so typing a value and hitting save works on the FIRST
+            # click (outside a form the first click only commits the field)
+            with st.form("b2b_shipment", clear_on_submit=True):
+                c3, c4, c5 = st.columns(3)
+                s_date = c3.date_input("თარიღი", value=date.today())
+                kegs = c4.number_input(f"წაიღო სავსე კეგი (×{ksize:g}ლ)",
+                                       min_value=0, step=1)
+                price = c5.number_input("ფასი ₾/ლ", min_value=0.0, step=0.1,
+                                        value=float(cur_price))
+                c6, c7 = st.columns(2)
+                kegs_back = c6.number_input("დააბრუნა ცარიელი კეგი", min_value=0, step=1)
+                # never assume payment: the debt is created by default and any
+                # payment is entered explicitly
+                paid_now = c7.number_input("ახლა გადაიხადა (₾)", min_value=0.0,
+                                           step=1.0, value=0.0)
+                note = st.text_input("შენიშვნა")
                 save_price = st.checkbox(
-                    f"ამ კლიენტის ფასიც განვაახლო: {cur_price:g} → {price:g} ₾/ლ",
-                    value=True, key="sh_saveprice")
+                    f"შეცვლილი ფასი დაიმახსოვრე ამ კლიენტისთვის (ახლა {cur_price:g} ₾/ლ)",
+                    value=True)
+                confirm_odd = st.checkbox("დიახ, უჩვეულო მონაცემიც სწორია")
+                submitted = st.form_submit_button("💾 გატანის ჩაწერა")
 
-            ok = sanity_gate([
-                (price > 100, f"ფასი {price:g} ₾/ლ — ჩვეულებრივზე ბევრად მეტია."),
-                (paid_now > total, f"გადახდილი ({paid_now:g} ₾) ჯამზე ({total:g} ₾) მეტია."),
-                (kegs > free_now,
-                 f"წასაღებია {kegs} კეგი, ქარხანაში კი {free_now:g} თავისუფალია."),
-                (kegs_back > held_now,
-                 f"აბრუნებს {kegs_back} კეგს, მაგრამ მასთან {held_now:g} ირიცხება."),
-            ], key=f"sanity_ship_{cid}")
+            if submitted:
+                vol = kegs * ksize
+                total = round(vol * price, 2)
+                problems = [m for bad, m in [
+                    (price > 100, f"ფასი {price:g} ₾/ლ — ჩვეულებრივზე ბევრად მეტია."),
+                    (paid_now > total, f"გადახდილი ({paid_now:g} ₾) ჯამზე ({total:g} ₾) მეტია."),
+                    (kegs > free_now,
+                     f"წასაღებია {kegs} კეგი, ქარხანაში კი {free_now:g} თავისუფალია."),
+                    (kegs_back > held_now,
+                     f"აბრუნებს {kegs_back} კეგს, მაგრამ მასთან {held_now:g} ირიცხება."),
+                ] if bad]
+            else:
+                vol = total = 0
+                problems = []
 
-            if st.button("💾 გატანის ჩაწერა", disabled=not ok) and (kegs > 0 or kegs_back > 0):
+            if submitted and kegs <= 0 and kegs_back <= 0:
+                st.error("შეავსე კეგების რაოდენობა.")
+            elif submitted and problems and not confirm_odd:
+                for m in problems:
+                    st.warning(f"⚠️ {m}")
+                st.error("დაადასტურე ქვედა გრაფა („უჩვეულო მონაცემიც სწორია“) და ხელახლა შეინახე.")
+            elif submitted:
                 sid = new_id("SHIP")
                 append_row("SHIPMENTS", {
                     "Shipment_ID": sid, "Date": str(s_date), "Client_ID": cid,
@@ -1786,13 +1840,13 @@ else:
                         "Asset_Type": "კეგი", "Detail": "სავსე", "Direction": "გატანა",
                         "Qty": kegs, "Notes": f"გატანასთან ერთად ({sid})", "Operator": op,
                     })
-                if save_price:
+                if save_price and abs(price - cur_price) > 1e-9:
                     set_client_price(cid, pid, price)
                 log_change("B2B გატანა",
                            f"{cname}: {pname} {kegs} კეგი ({vol:g}ლ) × {price:g}₾ = {total:g}₾, "
                            f"გადახდილი {paid_now:g}₾, დააბრუნა {kegs_back}")
                 rest = total - paid_now
-                st.success(f"ჩაწერილია: {total:g} ₾"
+                flash(f"ჩაწერილია: {total:g} ₾"
                            + (f", ნაშთი {rest:g} ₾" if rest > 0 else ", სრულად გადახდილი"))
                 st.rerun()
 
@@ -1805,24 +1859,29 @@ else:
             cid = cl_map[cname]
             bal = client_balance(cid, ship_df, pay_df)
             st.metric("მიმდინარე დავალიანება (₾)", f"{bal:g}")
-            c1, c2, c3 = st.columns(3)
-            p_date = c1.date_input("თარიღი", value=date.today(), key="pay_date")
-            amount = c2.number_input("თანხა (₾)", min_value=0.0, step=10.0,
-                                     value=float(max(bal, 0)), key="pay_amount")
-            method = c3.selectbox("მეთოდი", ["ნაღდი", "გადარიცხვა", "სხვა"], key="pay_method")
-            note = st.text_input("შენიშვნა", key="pay_note")
-            ok = sanity_gate([
-                (amount > bal + 0.01 and bal > 0,
-                 f"გადახდა ({amount:g} ₾) დავალიანებაზე ({bal:g} ₾) მეტია — წინსწრებით?"),
-            ], key=f"sanity_pay_{cid}")
-            if st.button("💾 გადახდის ჩაწერა", disabled=not ok) and amount > 0:
+            with st.form("b2b_payment", clear_on_submit=True):
+                c1, c2, c3 = st.columns(3)
+                p_date = c1.date_input("თარიღი", value=date.today())
+                amount = c2.number_input("თანხა (₾)", min_value=0.0, step=10.0,
+                                         value=float(max(bal, 0)))
+                method = c3.selectbox("მეთოდი", ["ნაღდი", "გადარიცხვა", "სხვა"])
+                note = st.text_input("შენიშვნა")
+                confirm_over = st.checkbox("დიახ, დავალიანებაზე მეტია (წინსწრებით)")
+                submitted = st.form_submit_button("💾 გადახდის ჩაწერა")
+
+            if submitted and amount <= 0:
+                st.error("შეავსე თანხა.")
+            elif submitted and amount > bal + 0.01 and bal > 0 and not confirm_over:
+                st.warning(f"⚠️ გადახდა ({amount:g} ₾) დავალიანებაზე ({bal:g} ₾) მეტია.")
+                st.error("დაადასტურე ქვედა გრაფა და ხელახლა შეინახე.")
+            elif submitted:
                 append_row("PAYMENTS", {
                     "Payment_ID": new_id("PAY"), "Date": str(p_date), "Client_ID": cid,
                     "Amount_GEL": amount, "Method": method, "Shipment_ID": "",
                     "Notes": note, "Operator": st.session_state.get("operator", ""),
                 })
                 log_change("B2B გადახდა", f"{cname}: {amount:g}₾ ({method})")
-                st.success(f"ჩაწერილია. ახალი ბალანსი: {bal - amount:g} ₾")
+                flash(f"ჩაწერილია. ახალი ბალანსი: {bal - amount:g} ₾")
                 st.rerun()
 
     # ---------------- ASSETS ----------------
@@ -1842,24 +1901,28 @@ else:
             else:
                 st.caption("ამჟამად ინვენტარი მასთან არ ირიცხება.")
 
-            c1, c2 = st.columns(2)
-            atype = c1.selectbox("ტიპი", ASSET_TYPES + ["✏️ სხვა (ხელით)"], key="as_type")
-            if atype == "✏️ სხვა (ხელით)":
-                atype = c1.text_input("ახალი ტიპის დასახელება", key="as_type_custom").strip()
-            direction = c2.radio("მიმართულება", ["გატანა", "დაბრუნება"],
-                                 horizontal=True, key="as_dir")
-            c3, c4, c5 = st.columns(3)
-            a_date = c3.date_input("თარიღი", value=date.today(), key="as_date")
-            qty = c4.number_input("რაოდენობა", min_value=1, step=1, key="as_qty")
-            detail = c5.text_input("დეტალი (მაგ. 50ლ, სერიული)", key="as_detail")
-            note = st.text_input("შენიშვნა", key="as_note")
+            with st.form("b2b_asset", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                atype_pick = c1.selectbox("ტიპი", ASSET_TYPES + ["✏️ სხვა (ხელით)"])
+                atype_custom = c1.text_input("ახალი ტიპი (თუ „სხვა“ აირჩიე)")
+                direction = c2.radio("მიმართულება", ["გატანა", "დაბრუნება"], horizontal=True)
+                c3, c4, c5 = st.columns(3)
+                a_date = c3.date_input("თარიღი", value=date.today())
+                qty = c4.number_input("რაოდენობა", min_value=1, step=1)
+                detail = c5.text_input("დეტალი (მაგ. 50ლ, სერიული)")
+                note = st.text_input("შენიშვნა")
+                confirm_over = st.checkbox("დიახ, მაინც ჩაწერე")
+                submitted = st.form_submit_button("💾 ჩაწერა")
 
+            atype = atype_custom.strip() if atype_pick.startswith("✏️") else atype_pick
             have = held.get(atype, 0)
-            ok = sanity_gate([
-                (direction == "დაბრუნება" and qty > have,
-                 f"დაბრუნება {qty} ცალი, მაგრამ მასთან {have:g} ირიცხება."),
-            ], key=f"sanity_asset_{cid}")
-            if st.button(f"💾 {direction}-ის ჩაწერა", disabled=not ok) and atype:
+            if submitted and not atype:
+                st.error("შეავსე ტიპის დასახელება.")
+            elif (submitted and direction == "დაბრუნება" and qty > have
+                  and not confirm_over):
+                st.warning(f"⚠️ დაბრუნება {qty} ცალი, მაგრამ მასთან {have:g} ირიცხება.")
+                st.error("დაადასტურე ქვედა გრაფა და ხელახლა შეინახე.")
+            elif submitted:
                 append_row("ASSET_MOVES", {
                     "Move_ID": new_id("MOVE"), "Date": str(a_date), "Client_ID": cid,
                     "Asset_Type": atype, "Detail": detail, "Direction": direction,
@@ -1867,7 +1930,7 @@ else:
                     "Operator": st.session_state.get("operator", ""),
                 })
                 log_change("B2B ინვენტარი", f"{cname}: {atype} {direction} {qty} ცალი")
-                st.success(f"{atype} — {direction} {qty} ცალი ჩაწერილია.")
+                flash(f"{atype} — {direction} {qty} ცალი ჩაწერილია.")
                 st.rerun()
 
     # ---------------- SETUP ----------------
@@ -1894,7 +1957,7 @@ else:
                     "Created_Date": str(date.today()), "Notes": cnote,
                 })
                 log_change("B2B კლიენტი დაემატა", cname_new)
-                st.success(f"{cname_new} დაემატა.")
+                flash(f"{cname_new} დაემატა.")
                 st.rerun()
 
         st.divider()
@@ -1915,7 +1978,7 @@ else:
                     "Notes": pnote,
                 })
                 log_change("B2B პროდუქტი დაემატა", f"{pname_new} ({pcat}) {pprice:g}₾/ლ")
-                st.success(f"{pname_new} დაემატა.")
+                flash(f"{pname_new} დაემატა.")
                 st.rerun()
 
         if cl_map and pr_map:
@@ -1930,5 +1993,5 @@ else:
             if st.button("💾 ფასის შენახვა"):
                 set_client_price(cl_map[pc], pr_map[pp], newp)
                 log_change("B2B ფასი", f"{pc} / {pp}: {cur:g} → {newp:g} ₾/ლ")
-                st.success("ფასი შენახულია.")
+                flash("ფასი შენახულია.")
                 st.rerun()
