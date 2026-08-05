@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "2026-08-04 · v9 (კეგები 30ლ + ბალანსის fix)"
+APP_VERSION = "2026-08-04 · v10 (დღის დახურვის fix)"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -749,6 +749,10 @@ elif page == "🍺 ხარშვა":
         # one control drives ALL per-day data (წყალი/მეშინგი/ალაო/სვია).
         # OG/Boil-header, საფუარი, gravity are shared across both days.
         with st.container(border=True, key="brewday-panel"):
+            # a widget's session_state key can only be set BEFORE the widget is
+            # created, so closing day 1 leaves a flag that is applied here
+            if st.session_state.pop("_jump_to_day2", False):
+                st.session_state["brew_day_global"] = 2
             brew_day = st.radio(
                 "📅 ხარშვის დღე (თითო 800 L) — გადართე და ყველა ველი შესაბამის დღეზე გადავა",
                 [1, 2], horizontal=True, key="brew_day_global")
@@ -795,10 +799,7 @@ elif page == "🍺 ხარშვა":
                     log_change("დღე დაიხურა", f"დღე {brew_day}", bid=bid,
                                brew_name=choice, day=brew_day)
                     if brew_day == 1:  # jump straight to day 2 — the step that got forgotten
-                        st.session_state["brew_day_global"] = 2
-                        st.success("დღე 1 დაიხურა — გადაერთე დღე 2-ზე.")
-                    else:
-                        st.success("დღე 2 დაიხურა.")
+                        st.session_state["_jump_to_day2"] = True
                     st.rerun()
 
         BREW_TABS = ["📊 მიმოხილვა", "💧 წყალი", "🌾 მეშინგი", "🔥 დუღილი (boil/hop)", "🧪 ფერმენტაცია/Gravity"]
