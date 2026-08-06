@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "v14 · 2026-08-06 · ხარშვების დალაგება"
+APP_VERSION = "v15 · 2026-08-06 · წყლის ფორმის fix"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -1080,20 +1080,20 @@ elif page == "🍺 ხარშვა":
             with st.form(f"water_form_{water_day}"):
                 st.markdown(f"**Mash წყალი** — დღე {water_day}")
                 m1, m2, m3, m4, m5 = st.columns(5)
-                m_vol = m1.number_input("მოცულობა (L)", min_value=0.0, value=float(wd["Mash"]["vol"] or 0), disabled=locked)
-                m_gyp = m2.number_input("Gypsum (g)", value=float(wd["Mash"]["gyp"] or 0), disabled=locked)
-                m_cacl = m3.number_input("CaCl2 (g)", value=float(wd["Mash"]["cacl2"] or 0), disabled=locked)
-                m_lac = m4.number_input("Lactic (ml)", value=float(wd["Mash"]["lac"] or 0), disabled=locked)
-                m_ph = m5.number_input("Target pH", value=float(wd["Mash"]["ph"] or 5.3), disabled=locked)
+                m_vol = m1.number_input("მოცულობა (L)", min_value=0.0, value=float(wd["Mash"]["vol"] or 0), key=f"wf_m_vol_{water_day}", disabled=locked)
+                m_gyp = m2.number_input("Gypsum (g)", value=float(wd["Mash"]["gyp"] or 0), key=f"wf_m_gyp_{water_day}", disabled=locked)
+                m_cacl = m3.number_input("CaCl2 (g)", value=float(wd["Mash"]["cacl2"] or 0), key=f"wf_m_cacl_{water_day}", disabled=locked)
+                m_lac = m4.number_input("Lactic (ml)", value=float(wd["Mash"]["lac"] or 0), key=f"wf_m_lac_{water_day}", disabled=locked)
+                m_ph = m5.number_input("Target pH", value=float(wd["Mash"]["ph"] or 5.3), key=f"wf_m_ph_{water_day}", disabled=locked)
 
                 st.markdown(f"**Sparge წყალი** — დღე {water_day}")
                 s1, s2, s3, s4, s5 = st.columns(5)
-                s_vol = s1.number_input("მოცულობა (L)", value=float(wd["Sparge"]["vol"] or 1000), disabled=locked)
-                s_gyp = s2.number_input("Gypsum (g)", value=float(wd["Sparge"]["gyp"] or 0), disabled=locked)
-                s_cacl = s3.number_input("CaCl2 (g)", value=float(wd["Sparge"]["cacl2"] or 0), disabled=locked)
-                s_lac = s4.number_input("Lactic (ml)", value=float(wd["Sparge"]["lac"] or 0), disabled=locked)
-                s_ph = s5.number_input("Target pH", value=float(wd["Sparge"]["ph"] or 5.7), disabled=locked)
-                water_confirm = st.checkbox("დიახ, უჩვეულო მონაცემიც სწორია", disabled=locked)
+                s_vol = s1.number_input("მოცულობა (L)", value=float(wd["Sparge"]["vol"] or 1000), key=f"wf_s_vol_{water_day}", disabled=locked)
+                s_gyp = s2.number_input("Gypsum (g)", value=float(wd["Sparge"]["gyp"] or 0), key=f"wf_s_gyp_{water_day}", disabled=locked)
+                s_cacl = s3.number_input("CaCl2 (g)", value=float(wd["Sparge"]["cacl2"] or 0), key=f"wf_s_cacl_{water_day}", disabled=locked)
+                s_lac = s4.number_input("Lactic (ml)", value=float(wd["Sparge"]["lac"] or 0), key=f"wf_s_lac_{water_day}", disabled=locked)
+                s_ph = s5.number_input("Target pH", value=float(wd["Sparge"]["ph"] or 5.7), key=f"wf_s_ph_{water_day}", disabled=locked)
+                water_confirm = st.checkbox("დიახ, უჩვეულო მონაცემიც სწორია", key=f"wf_ok_{water_day}", disabled=locked)
                 water_submit = st.form_submit_button(
                     f"💾 წყლის მონაცემის შენახვა (დღე {water_day})", disabled=locked)
 
@@ -1292,8 +1292,8 @@ elif page == "🍺 ხარშვა":
                         # historical entries may exceed today's stock — no cap then
                         max_value=malt_cap if (malt_cap and malt_cap > 0 and not hist_mode) else None,
                         disabled=locked)
-                    malt_just = c3.text_input("დასაბუთება", disabled=locked)
-                    malt_confirm = st.checkbox("დიახ, უჩვეულო რაოდენობაც სწორია", disabled=locked)
+                    malt_just = c3.text_input("დასაბუთება", key=f"mf_just_{brew_day}", disabled=locked)
+                    malt_confirm = st.checkbox("დიახ, უჩვეულო რაოდენობაც სწორია", key=f"mf_ok_{brew_day}", disabled=locked)
                     malt_submit = st.form_submit_button("დამატება (ალაო)", disabled=locked)
                 malt_deduct = convert_to_inventory_unit(malt_qty, "kg", malt_inv_unit)
                 # duplicate = same Brew_ID+Category+Item AND same brew day —
@@ -1408,8 +1408,8 @@ elif page == "🍺 ხარშვა":
                                   key="hop_aa_display")
                     hop_timing_custom = st.text_input(
                         "დრო — ხელით (თუ „სხვა“ აირჩიე, მაგ. 45წთ)", disabled=locked)
-                    hop_just = st.text_input("დასაბუთება", disabled=locked)
-                    hop_confirm = st.checkbox("დიახ, უჩვეულო რაოდენობაც სწორია", disabled=locked)
+                    hop_just = st.text_input("დასაბუთება", key=f"hf_just_{brew_day}", disabled=locked)
+                    hop_confirm = st.checkbox("დიახ, უჩვეულო რაოდენობაც სწორია", key=f"hf_ok_{brew_day}", disabled=locked)
                     hop_submit = st.form_submit_button("დამატება (ჰოპი)", disabled=locked)
 
                 hop_timing = (hop_timing_custom.strip() if hop_timing_sel == "სხვა"
@@ -1791,7 +1791,7 @@ else:
             # click (outside a form the first click only commits the field)
             with st.form("b2b_shipment", clear_on_submit=True):
                 c3, c4, c5 = st.columns(3)
-                s_date = c3.date_input("თარიღი", value=date.today())
+                s_date = c3.date_input("თარიღი", value=date.today(), key="shf_date")
                 kegs = c4.number_input(f"წაიღო სავსე კეგი (×{ksize:g}ლ)",
                                        min_value=0, step=1)
                 price = c5.number_input("ფასი ₾/ლ", min_value=0.0, step=0.1,
@@ -1802,7 +1802,7 @@ else:
                 # payment is entered explicitly
                 paid_now = c7.number_input("ახლა გადაიხადა (₾)", min_value=0.0,
                                            step=1.0, value=0.0)
-                note = st.text_input("შენიშვნა")
+                note = st.text_input("შენიშვნა", key="shf_note")
                 save_price = st.checkbox(
                     f"შეცვლილი ფასი დაიმახსოვრე ამ კლიენტისთვის (ახლა {cur_price:g} ₾/ლ)",
                     value=True)
@@ -1873,11 +1873,11 @@ else:
             st.metric("მიმდინარე დავალიანება (₾)", f"{bal:g}")
             with st.form("b2b_payment", clear_on_submit=True):
                 c1, c2, c3 = st.columns(3)
-                p_date = c1.date_input("თარიღი", value=date.today())
+                p_date = c1.date_input("თარიღი", value=date.today(), key="payf_date")
                 amount = c2.number_input("თანხა (₾)", min_value=0.0, step=10.0,
                                          value=float(max(bal, 0)))
                 method = c3.selectbox("მეთოდი", ["ნაღდი", "გადარიცხვა", "სხვა"])
-                note = st.text_input("შენიშვნა")
+                note = st.text_input("შენიშვნა", key="payf_note")
                 confirm_over = st.checkbox("დიახ, დავალიანებაზე მეტია (წინსწრებით)")
                 submitted = st.form_submit_button("💾 გადახდის ჩაწერა")
 
@@ -1915,14 +1915,14 @@ else:
 
             with st.form("b2b_asset", clear_on_submit=True):
                 c1, c2 = st.columns(2)
-                atype_pick = c1.selectbox("ტიპი", ASSET_TYPES + ["✏️ სხვა (ხელით)"])
+                atype_pick = c1.selectbox("ტიპი", ASSET_TYPES + ["✏️ სხვა (ხელით)"], key="asf_type")
                 atype_custom = c1.text_input("ახალი ტიპი (თუ „სხვა“ აირჩიე)")
                 direction = c2.radio("მიმართულება", ["გატანა", "დაბრუნება"], horizontal=True)
                 c3, c4, c5 = st.columns(3)
-                a_date = c3.date_input("თარიღი", value=date.today())
+                a_date = c3.date_input("თარიღი", value=date.today(), key="asf_date")
                 qty = c4.number_input("რაოდენობა", min_value=1, step=1)
                 detail = c5.text_input("დეტალი (მაგ. 50ლ, სერიული)")
-                note = st.text_input("შენიშვნა")
+                note = st.text_input("შენიშვნა", key="asf_note")
                 confirm_over = st.checkbox("დიახ, მაინც ჩაწერე")
                 submitted = st.form_submit_button("💾 ჩაწერა")
 
