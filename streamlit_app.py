@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "v18 · 2026-08-14 · ბრაკი/ჩანაცვლება"
+APP_VERSION = "v19 · 2026-08-14 · ანალიტიკა"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -1756,7 +1756,7 @@ else:
         for _, r in products_df.iterrows():
             pr_map[f"{r.get('Name')} ({r.get('Category')})"] = r["Product_ID"]
 
-    CL_TABS = ["📋 მიმოხილვა", "👤 კლიენტის ბარათი", "🚚 გატანა",
+    CL_TABS = ["📋 მიმოხილვა", "📈 ანალიტიკა", "👤 კლიენტის ბარათი", "🚚 გატანა",
                "💰 გადახდა", "♻️ ბრაკი/ჩანაცვლება", "📦 ინვენტარი",
                "🕓 ბოლო ოპერაციები", "⚙️ კლიენტები/პროდუქტები"]
     # single source of truth: the widget's own key. Mirroring it into another
@@ -1796,6 +1796,150 @@ else:
             c4.metric("ქარხანაში თავისუფალი", f"{kegs_free():g}")
             st.caption(f"სულ კეგი: {kegs_total():g} (შესაცვლელად — SETTINGS → Kegs_Total)")
             st.dataframe(ov, use_container_width=True, hide_index=True)
+
+    # ---------------- ANALYTICS ----------------
+    elif cl_tab == "📈 ანალიტიკა":
+        if ship_df.empty and pay_df.empty:
+            st.info("ჯერ არ არის მონაცემი ანალიზისთვის.")
+        else:
+            names = {r["Client_ID"]: r["Name"] for _, r in clients_df.iterrows()} \
+                if not clients_df.empty and "Client_ID" in clients_df.columns else {}
+            pnames = {r["Product_ID"]: r["Name"] for _, r in products_df.iterrows()} \
+                if not products_df.empty and "Product_ID" in products_df.columns else {}
+
+            def to_dt(df):
+                # dates are stored as plain strings; anything unparseable drops out
+                if df.empty or "Date" not in df.columns:
+                    return pd.DataFrame()
+                d = df.copy()
+                d["_dt"] = pd.to_datetime(d["Date"], errors="coerce")
+                return d.dropna(subset=["_dt"])
+
+            sh_all, pa_all = to_dt(ship_df), to_dt(pay_df)
+            all_dt = pd.concat([sh_all.get("_dt", pd.Series(dtype="datetime64[ns]")),
+                                pa_all.get("_dt", pd.Series(dtype="datetime64[ns]"))])
+            if all_dt.empty:
+                st.info("თარიღიანი ჩანაწერი ვერ მოიძებნა.")
+                st.stop()
+            first, last = all_dt.min().date(), all_dt.max().date()
+
+            today = date.today()
+            PRESETS = ["მიმდინარე თვე", "გასული თვე", "მიმდინარე წელი",
+                       "ბოლო 12 თვე", "მთელი პერიოდი", "თარიღები ხელით"]
+            f1, f2 = st.columns([2, 3])
+            preset = f1.selectbox("პერიოდი", PRESETS, key="an_preset")
+            if preset == "მიმდინარე თვე":
+                p_from, p_to = today.replace(day=1), today
+            elif preset == "გასული თვე":
+                first_this = today.replace(day=1)
+                p_to = first_this - pd.Timedelta(days=1)
+                p_from, p_to = p_to.replace(day=1).date(), p_to.date()
+            elif preset == "მიმდინარე წელი":
+                p_from, p_to = today.replace(month=1, day=1), today
+            elif preset == "ბოლო 12 თვე":
+                p_from, p_to = (pd.Timestamp(today) - pd.DateOffset(months=12)).date(), today
+            elif preset == "მთელი პერიოდი":
+                p_from, p_to = first, last
+            else:
+                rng = f2.date_input("აირჩიე შუალედი", value=(first, last), key="an_range")
+                p_from, p_to = (rng if isinstance(rng, (list, tuple)) and len(rng) == 2
+                                else (first, last))
+            if preset != "თარიღები ხელით":
+                f2.caption(f"{p_from} — {p_to}")
+
+            who = st.selectbox("კლიენტი", ["ყველა კლიენტი"] + list(cl_map.keys()),
+                               key="an_client")
+            only = cl_map.get(who)  # None when "ყველა კლიენტი"
+
+            def in_period(d):
+                if d.empty:
+                    return d
+                m = (d["_dt"].dt.date >= p_from) & (d["_dt"].dt.date <= p_to)
+                if only:
+                    m &= d["Client_ID"] == only
+                return d[m]
+
+            sp, pp = in_period(sh_all), in_period(pa_all)
+
+            sold = sum(_num(x) for x in sp.get("Total_GEL", []))
+            # money actually received = paid at delivery + separate payments
+            got = (sum(_num(x) for x in sp.get("Paid_Now_GEL", []))
+                   + sum(_num(x) for x in pp.get("Amount_GEL", [])))
+            kegs_sold = sum(_num(x) for x in sp.get("Kegs_Out", []))
+            litres = sum(_num(x) for x in sp.get("Volume_L", []))
+
+            st.markdown(f"### {who} · {p_from} — {p_to}")
+            m1, m2, m3, m4 = st.columns(4, gap="large")
+            m1.metric("გაყიდული (₾)", f"{sold:g}")
+            m2.metric("მიღებული ფული (₾)", f"{got:g}")
+            m3.metric("კეგი", f"{kegs_sold:g}")
+            m4.metric("ლიტრი", f"{litres:g}")
+            st.caption("„გაყიდული“ — რამდენზე გაატანე ამ პერიოდში (ბრაკის დაბრუნება "
+                       "მინუსში ითვლება). „მიღებული“ — რამდენი ფული შემოვიდა ამ "
+                       "პერიოდში, გატანისას გადახდილი + ცალკე გადახდები.")
+
+            # ---- monthly trend ----
+            with st.container(border=True, key="an-trend"):
+                st.markdown("#### თვეების ჭრილში")
+                rows = {}
+                for _, r in sp.iterrows():
+                    k = r["_dt"].strftime("%Y-%m")
+                    rows.setdefault(k, {"გაყიდული": 0.0, "მიღებული": 0.0})
+                    rows[k]["გაყიდული"] += _num(r.get("Total_GEL"))
+                    rows[k]["მიღებული"] += _num(r.get("Paid_Now_GEL"))
+                for _, r in pp.iterrows():
+                    k = r["_dt"].strftime("%Y-%m")
+                    rows.setdefault(k, {"გაყიდული": 0.0, "მიღებული": 0.0})
+                    rows[k]["მიღებული"] += _num(r.get("Amount_GEL"))
+                if rows:
+                    trend = pd.DataFrame(rows).T.sort_index()
+                    st.bar_chart(trend)
+                    st.dataframe(trend.reset_index().rename(columns={"index": "თვე"}),
+                                 use_container_width=True, hide_index=True)
+                else:
+                    st.caption("ამ პერიოდში ჩანაწერი არ არის.")
+
+            # ---- by client ----
+            if not only:
+                with st.container(border=True, key="an-clients"):
+                    st.markdown("#### კლიენტების ჭრილში")
+                    per = {}
+                    for _, r in sp.iterrows():
+                        c = names.get(r.get("Client_ID"), r.get("Client_ID"))
+                        per.setdefault(c, {"გაყიდული (₾)": 0.0, "მიღებული (₾)": 0.0, "კეგი": 0.0})
+                        per[c]["გაყიდული (₾)"] += _num(r.get("Total_GEL"))
+                        per[c]["მიღებული (₾)"] += _num(r.get("Paid_Now_GEL"))
+                        per[c]["კეგი"] += _num(r.get("Kegs_Out"))
+                    for _, r in pp.iterrows():
+                        c = names.get(r.get("Client_ID"), r.get("Client_ID"))
+                        per.setdefault(c, {"გაყიდული (₾)": 0.0, "მიღებული (₾)": 0.0, "კეგი": 0.0})
+                        per[c]["მიღებული (₾)"] += _num(r.get("Amount_GEL"))
+                    if per:
+                        t = pd.DataFrame(per).T.reset_index().rename(columns={"index": "კლიენტი"})
+                        t["მიმდინარე დავალიანება (₾)"] = [
+                            client_balance(cl_map.get(c, ""), ship_df, pay_df) if c in cl_map else 0
+                            for c in t["კლიენტი"]]
+                        st.dataframe(t.sort_values("გაყიდული (₾)", ascending=False),
+                                     use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("ამ პერიოდში გაყიდვა არ არის.")
+
+            # ---- by product ----
+            with st.container(border=True, key="an-products"):
+                st.markdown("#### პროდუქტების ჭრილში")
+                per = {}
+                for _, r in sp.iterrows():
+                    nm = pnames.get(r.get("Product_ID"), "(მიუთითებელი)")
+                    per.setdefault(nm, {"გაყიდული (₾)": 0.0, "კეგი": 0.0, "ლიტრი": 0.0})
+                    per[nm]["გაყიდული (₾)"] += _num(r.get("Total_GEL"))
+                    per[nm]["კეგი"] += _num(r.get("Kegs_Out"))
+                    per[nm]["ლიტრი"] += _num(r.get("Volume_L"))
+                if per:
+                    t = pd.DataFrame(per).T.reset_index().rename(columns={"index": "პროდუქტი"})
+                    st.dataframe(t.sort_values("გაყიდული (₾)", ascending=False),
+                                 use_container_width=True, hide_index=True)
+                else:
+                    st.caption("ამ პერიოდში გაყიდვა არ არის.")
 
     # ---------------- CLIENT CARD ----------------
     elif cl_tab == "👤 კლიენტის ბარათი":
