@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "v16 · 2026-08-14 · ბოლო ოპერაციები"
+APP_VERSION = "v17 · 2026-08-14 · ბოლო ოპერაციები + კავშირის აღდგენა"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -49,17 +49,37 @@ _flash_msg = st.session_state.pop("_flash", None)
 if _flash_msg:
     st.toast(_flash_msg, icon="✅")
 
+API_TIMEOUT = 20  # seconds; without this a wedged socket hangs the app forever
+
 @st.cache_resource
 def get_client():
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPES
     )
-    return gspread.authorize(creds)
+    gc = gspread.authorize(creds)
+    gc.set_timeout(API_TIMEOUT)
+    return gc
 
 @st.cache_resource
 def get_sheet():
     client = get_client()
     return client.open_by_key(st.secrets["sheet_id"])
+
+def reset_connection():
+    # The gspread client/worksheets live in cache_resource. If that connection
+    # goes stale the app hangs on every call with no way back except a reboot,
+    # which the owner cannot always reach. Dropping the cached handles lets the
+    # next run build a fresh connection.
+    for fn in (get_client, get_sheet, ws):
+        try:
+            fn.clear()
+        except Exception:
+            pass
+    for fn in (get_df, _all_sheet_values, sheet_headers):
+        try:
+            fn.clear()
+        except Exception:
+            pass
 
 @st.cache_resource(show_spinner=False)
 def ws(name):
@@ -78,7 +98,7 @@ def ws(name):
         w.append_row(headers)
         return w
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=True)
 def _all_sheet_values():
     # ONE batched read of every worksheet. Reading sheets one by one cost ~3s
     # per rerun (a call each); batched it is ~0.9s total, and every get_df in
@@ -707,6 +727,10 @@ hist_mode = st.session_state.historical_mode
 st.sidebar.text_input("👤 ვინ ავსებს (ჟურნალისთვის)", key="operator",
                       placeholder="სახელი")
 st.sidebar.caption(f"ვერსია: {APP_VERSION}")
+if st.sidebar.button("🔄 კავშირის განახლება", help="თუ აპი ჩაიჭედა ან მონაცემები "
+                                                   "არ ჩანს — დააჭირე ერთხელ"):
+    reset_connection()
+    st.rerun()
 
 # ============================================================
 # PAGE 1 — INVENTORY
