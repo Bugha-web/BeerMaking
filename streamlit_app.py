@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "v17 · 2026-08-14 · ბოლო ოპერაციები + კავშირის აღდგენა"
+APP_VERSION = "v18 · 2026-08-14 · ბრაკი/ჩანაცვლება"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -1757,8 +1757,8 @@ else:
             pr_map[f"{r.get('Name')} ({r.get('Category')})"] = r["Product_ID"]
 
     CL_TABS = ["📋 მიმოხილვა", "👤 კლიენტის ბარათი", "🚚 გატანა",
-               "💰 გადახდა", "📦 ინვენტარი", "🕓 ბოლო ოპერაციები",
-               "⚙️ კლიენტები/პროდუქტები"]
+               "💰 გადახდა", "♻️ ბრაკი/ჩანაცვლება", "📦 ინვენტარი",
+               "🕓 ბოლო ოპერაციები", "⚙️ კლიენტები/პროდუქტები"]
     # single source of truth: the widget's own key. Mirroring it into another
     # session_state variable AND passing index= made the radio lag one render
     # behind, so a tab switch needed two or three clicks.
@@ -2000,6 +2000,113 @@ else:
                 log_change("B2B გადახდა", f"{cname}: {amount:g}₾ ({method})")
                 flash(f"ჩაწერილია. ახალი ბალანსი: {bal - amount:g} ₾")
                 st.rerun()
+
+    # ---------------- DEFECT / REPLACEMENT ----------------
+    elif cl_tab == "♻️ ბრაკი/ჩანაცვლება":
+        if not cl_map:
+            st.info("ჯერ დაამატე კლიენტი.")
+        else:
+            st.caption("გაფუჭებული ლუდის კეგი ბრუნდება. შემდეგ ან თანხას "
+                       "ვუბრუნებთ, ან უფასოდ ვატანთ ახალ კეგს.")
+            d1, d2 = st.columns(2)
+            cname = d1.selectbox("კლიენტი", list(cl_map.keys()), index=None,
+                                 placeholder="— აირჩიე კლიენტი —", key="df_client")
+            pname = d2.selectbox("პროდუქტი (რომელი ლუდი იყო)", list(pr_map.keys()),
+                                 index=None, placeholder="— აირჩიე —", key="df_product")
+            if not cname:
+                st.info("აირჩიე კლიენტი, რომ ფორმა გამოჩნდეს.")
+                st.stop()
+            cid = cl_map[cname]
+            pid = pr_map[pname] if pname else ""
+            ksize = keg_size_l()
+            held_now = client_assets(cid, moves_df).get("კეგი", 0)
+            free_now = kegs_free()
+            unit_price = client_price(cid, pid, get_df("CLIENT_PRICES"), products_df) if pid else 0.0
+
+            k1, k2, k3 = st.columns(3)
+            k1.metric(f"{cname}-თან კეგი", f"{held_now:g}")
+            k2.metric("ქარხანაში თავისუფალი", f"{free_now:g}")
+            k3.metric("მიმდინარე დავალიანება (₾)", f"{client_balance(cid, ship_df, pay_df):g}")
+
+            with st.form("b2b_defect", clear_on_submit=True):
+                c1, c2, c3 = st.columns(3)
+                d_date = c1.date_input("თარიღი", value=date.today())
+                bad_kegs = c2.number_input("ბრაკიანი კეგი (ბრუნდება)", min_value=1, step=1)
+                mode = c3.radio("როგორ ვაანაზღაურებთ",
+                                ["თანხის დაბრუნება", "უფასო ჩანაცვლება"], horizontal=False)
+                c4, c5 = st.columns(2)
+                refund = c4.number_input("დასაბრუნებელი თანხა (₾)", min_value=0.0, step=1.0,
+                                         value=0.0,
+                                         help="დატოვე 0 — ავტომატურად დაითვლება "
+                                              "კეგების მიხედვით")
+                repl_kegs = c5.number_input("უფასო კეგი (ჩანაცვლება)", min_value=0, step=1,
+                                            value=0,
+                                            help="დატოვე 0 — იმდენივე, რამდენიც ბრაკია")
+                reason = st.text_input("მიზეზი / შენიშვნა",
+                                       placeholder="მაგ. ლუდი დამჟავდა, კეგი ჟონავს")
+                d_confirm = st.checkbox("დიახ, უჩვეულო მონაცემიც სწორია")
+                d_submit = st.form_submit_button("💾 ბრაკის ჩაწერა")
+
+            if d_submit:
+                is_refund = mode.startswith("თანხის")
+                # blank amount/count means "same as the bad kegs"
+                amount = refund if refund > 0 else round(bad_kegs * ksize * unit_price, 2)
+                give = repl_kegs if repl_kegs > 0 else bad_kegs
+                problems = [m for bad, m in [
+                    (bad_kegs > held_now,
+                     f"ბრაკად {bad_kegs} კეგი, მაგრამ {cname}-თან {held_now:g} ირიცხება."),
+                    (is_refund and amount <= 0,
+                     "დასაბრუნებელი თანხა 0-ია — მიუთითე თანხა ან აირჩიე პროდუქტი, "
+                     "რომ ფასი ავტომატურად აიღოს."),
+                    (not is_refund and give > free_now,
+                     f"ჩასანაცვლებელია {give} კეგი, ქარხანაში კი {free_now:g} თავისუფალია."),
+                    (is_refund and amount > 5000,
+                     f"დასაბრუნებელი {amount:g} ₾ — ჩვეულებრივზე ბევრად მეტია."),
+                ] if bad]
+
+                if problems and not d_confirm:
+                    for m in problems:
+                        st.warning(f"⚠️ {m}")
+                    st.error("დაადასტურე ფორმაში და ხელახლა შეინახე.")
+                else:
+                    sid = new_id("SHIP")
+                    op = st.session_state.get("operator", "")
+                    label = "ბრაკი — თანხის დაბრუნება" if is_refund else "ბრაკი — უფასო ჩანაცვლება"
+                    note_full = f"{label}" + (f" · {reason}" if reason else "")
+                    # a refund is booked as a negative sale (credit note); a free
+                    # replacement is a zero-priced delivery. Either way one
+                    # SHIPMENTS row carries the operation and its Ref_ID.
+                    append_row("SHIPMENTS", {
+                        "Shipment_ID": sid, "Date": str(d_date), "Client_ID": cid,
+                        "Product_ID": pid,
+                        "Volume_L": 0 if is_refund else give * ksize,
+                        "Price_per_L": 0,
+                        "Total_GEL": -amount if is_refund else 0,
+                        "Paid_Now_GEL": 0,
+                        "Kegs_Out": 0 if is_refund else give,
+                        "Kegs_Returned": bad_kegs, "Notes": note_full, "Operator": op,
+                    })
+                    append_row("ASSET_MOVES", {
+                        "Move_ID": new_id("MOVE"), "Date": str(d_date), "Client_ID": cid,
+                        "Asset_Type": "კეგი", "Detail": "ბრაკი", "Direction": "დაბრუნება",
+                        "Qty": bad_kegs, "Notes": note_full, "Operator": op, "Ref_ID": sid,
+                    })
+                    if not is_refund:
+                        append_row("ASSET_MOVES", {
+                            "Move_ID": new_id("MOVE"), "Date": str(d_date), "Client_ID": cid,
+                            "Asset_Type": "კეგი", "Detail": "ჩანაცვლება (უფასო)",
+                            "Direction": "გატანა", "Qty": give, "Notes": note_full,
+                            "Operator": op, "Ref_ID": sid,
+                        })
+                    log_change("B2B ბრაკი",
+                               f"{cname}: {bad_kegs} ბრაკი — "
+                               + (f"დაბრუნდა {amount:g}₾" if is_refund
+                                  else f"უფასოდ გაიცა {give} კეგი")
+                               + (f" ({reason})" if reason else ""))
+                    flash(f"ჩაწერილია: {bad_kegs} ბრაკიანი კეგი დაბრუნდა · "
+                          + (f"დავალიანება შემცირდა {amount:g} ₾-ით" if is_refund
+                             else f"უფასოდ გაიცა {give} კეგი"))
+                    st.rerun()
 
     # ---------------- ASSETS ----------------
     elif cl_tab == "📦 ინვენტარი":
