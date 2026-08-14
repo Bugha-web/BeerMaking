@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "v15 · 2026-08-06 · წყლის ფორმის fix"
+APP_VERSION = "v16 · 2026-08-14 · ბოლო ოპერაციები"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -161,10 +161,13 @@ SHEET_HEADERS = {
     "SHIPMENTS": ["Shipment_ID", "Date", "Client_ID", "Product_ID", "Volume_L",
                   "Price_per_L", "Total_GEL", "Paid_Now_GEL", "Kegs_Out", "Notes",
                   "Operator", "Kegs_Returned"],
+    # Ref_ID ties every row created by one operation (shipment + its keg
+    # movements + the payment taken at delivery) together, so the whole
+    # operation can be undone as a unit.
     "PAYMENTS": ["Payment_ID", "Date", "Client_ID", "Amount_GEL", "Method",
-                 "Shipment_ID", "Notes", "Operator"],
+                 "Shipment_ID", "Notes", "Operator", "Ref_ID"],
     "ASSET_MOVES": ["Move_ID", "Date", "Client_ID", "Asset_Type", "Detail",
-                    "Direction", "Qty", "Notes", "Operator"],
+                    "Direction", "Qty", "Notes", "Operator", "Ref_ID"],
 }
 
 # equipment lent to clients; the UI also allows typing a new type
@@ -193,6 +196,63 @@ def kegs_at_clients(moves_df=None):
 def kegs_free():
     # kegs sitting at the brewery right now
     return round(kegs_total() - kegs_at_clients(), 2)
+
+def recent_operations(limit=40):
+    # One row per real-world operation, newest first. A delivery and the keg
+    # movements booked with it share a Ref_ID and are shown as a single line.
+    ships, pays, moves = get_df("SHIPMENTS"), get_df("PAYMENTS"), get_df("ASSET_MOVES")
+    cl = get_df("CLIENTS")
+    names = ({r["Client_ID"]: r["Name"] for _, r in cl.iterrows()}
+             if not cl.empty and "Client_ID" in cl.columns else {})
+    prods = get_df("PRODUCTS")
+    pnames = ({r["Product_ID"]: r["Name"] for _, r in prods.iterrows()}
+              if not prods.empty and "Product_ID" in prods.columns else {})
+    ops = []
+    if not ships.empty and "Shipment_ID" in ships.columns:
+        for _, r in ships.iterrows():
+            sid = str(r.get("Shipment_ID"))
+            kegs, back = _num(r.get("Kegs_Out")), _num(r.get("Kegs_Returned"))
+            paid = _num(r.get("Paid_Now_GEL"))
+            bits = [f"{kegs:g} კეგი" if kegs else "", f"↩{back:g}" if back else "",
+                    f"{_num(r.get('Total_GEL')):g}₾",
+                    f"გადახდილი {paid:g}₾" if paid else ""]
+            ops.append({"ref": sid, "kind": "🚚 გატანა", "date": str(r.get("Date", "")),
+                        "client": names.get(r.get("Client_ID"), r.get("Client_ID")),
+                        "detail": f"{pnames.get(r.get('Product_ID'), '')} "
+                                  + " · ".join(b for b in bits if b)})
+    if not pays.empty and "Payment_ID" in pays.columns:
+        for _, r in pays.iterrows():
+            ref = str(r.get("Ref_ID") or r.get("Payment_ID"))
+            if not ships.empty and ref in set(ships.get("Shipment_ID", [])):
+                continue  # already shown as part of its delivery
+            ops.append({"ref": ref, "kind": "💰 გადახდა", "date": str(r.get("Date", "")),
+                        "client": names.get(r.get("Client_ID"), r.get("Client_ID")),
+                        "detail": f"{_num(r.get('Amount_GEL')):g}₾ ({r.get('Method', '')})"})
+    if not moves.empty and "Move_ID" in moves.columns:
+        for _, r in moves.iterrows():
+            ref = str(r.get("Ref_ID") or r.get("Move_ID"))
+            if ref.startswith("SHIP-"):
+                continue  # part of a delivery, already listed
+            ops.append({"ref": ref, "kind": "📦 ინვენტარი", "date": str(r.get("Date", "")),
+                        "client": names.get(r.get("Client_ID"), r.get("Client_ID")),
+                        "detail": f"{r.get('Asset_Type')} {r.get('Direction')} "
+                                  f"{_num(r.get('Qty')):g}"})
+    ops.sort(key=lambda o: (str(o["date"]), o["ref"]), reverse=True)
+    return ops[:limit]
+
+def delete_operation(ref):
+    # Remove every row belonging to one operation. Deleting the shipment row
+    # also removes its paid-at-delivery amount, so the balance unwinds cleanly.
+    removed = 0
+    removed += delete_rows_where("SHIPMENTS", "Shipment_ID", ref)
+    for sheet, col in (("ASSET_MOVES", "Ref_ID"), ("PAYMENTS", "Ref_ID")):
+        removed += delete_rows_where(sheet, col, ref)
+    if ref.startswith("PAY-"):
+        removed += delete_rows_where("PAYMENTS", "Payment_ID", ref)
+    if ref.startswith("MOVE-"):
+        removed += delete_rows_where("ASSET_MOVES", "Move_ID", ref)
+    invalidate_cache()
+    return removed
 
 def client_balance(client_id, ship_df=None, pay_df=None):
     # Owed = everything shipped minus everything paid. Never stored, always
@@ -1673,7 +1733,8 @@ else:
             pr_map[f"{r.get('Name')} ({r.get('Category')})"] = r["Product_ID"]
 
     CL_TABS = ["📋 მიმოხილვა", "👤 კლიენტის ბარათი", "🚚 გატანა",
-               "💰 გადახდა", "📦 ინვენტარი", "⚙️ კლიენტები/პროდუქტები"]
+               "💰 გადახდა", "📦 ინვენტარი", "🕓 ბოლო ოპერაციები",
+               "⚙️ კლიენტები/პროდუქტები"]
     # single source of truth: the widget's own key. Mirroring it into another
     # session_state variable AND passing index= made the radio lag one render
     # behind, so a tab switch needed two or three clicks.
@@ -1717,7 +1778,11 @@ else:
         if not cl_map:
             st.info("ჯერ დაამატე კლიენტი.")
         else:
-            pick = st.selectbox("კლიენტი", list(cl_map.keys()), key="card_client")
+            pick = st.selectbox("კლიენტი", list(cl_map.keys()), index=None,
+                                placeholder="— აირჩიე კლიენტი —", key="card_client")
+            if not pick:
+                st.info("აირჩიე კლიენტი, რომ მისი მონაცემები გამოჩნდეს.")
+                st.stop()
             cid = cl_map[pick]
             crow = clients_df[clients_df["Client_ID"] == cid].iloc[0]
             bal = client_balance(cid, ship_df, pay_df)
@@ -1775,8 +1840,13 @@ else:
             st.info("ჯერ დაამატე კლიენტი და პროდუქტი („⚙️“ ტაბი).")
         else:
             c1, c2 = st.columns(2)
-            cname = c1.selectbox("კლიენტი", list(cl_map.keys()), key="sh_client")
-            pname = c2.selectbox("პროდუქტი", list(pr_map.keys()), key="sh_product")
+            cname = c1.selectbox("კლიენტი", list(cl_map.keys()), index=None,
+                                 placeholder="— აირჩიე კლიენტი —", key="sh_client")
+            pname = c2.selectbox("პროდუქტი", list(pr_map.keys()), index=None,
+                                 placeholder="— აირჩიე პროდუქტი —", key="sh_product")
+            if not cname or not pname:
+                st.info("აირჩიე კლიენტი და პროდუქტი — შემდეგ გამოჩნდება ფორმა.")
+                st.stop()
             cid, pid = cl_map[cname], pr_map[pname]
 
             ksize = keg_size_l()
@@ -1844,14 +1914,19 @@ else:
                     append_row("ASSET_MOVES", {
                         "Move_ID": new_id("MOVE"), "Date": str(s_date), "Client_ID": cid,
                         "Asset_Type": "კეგი", "Detail": "ცარიელი", "Direction": "დაბრუნება",
-                        "Qty": kegs_back, "Notes": f"გატანასთან ერთად ({sid})", "Operator": op,
+                        "Qty": kegs_back, "Notes": f"გატანასთან ერთად ({sid})",
+                        "Operator": op, "Ref_ID": sid,
                     })
                 if kegs:  # then the full ones go out
                     append_row("ASSET_MOVES", {
                         "Move_ID": new_id("MOVE"), "Date": str(s_date), "Client_ID": cid,
                         "Asset_Type": "კეგი", "Detail": "სავსე", "Direction": "გატანა",
-                        "Qty": kegs, "Notes": f"გატანასთან ერთად ({sid})", "Operator": op,
+                        "Qty": kegs, "Notes": f"გატანასთან ერთად ({sid})",
+                        "Operator": op, "Ref_ID": sid,
                     })
+                # paid-at-delivery stays in the shipment's Paid_Now_GEL column;
+                # deleting the shipment therefore undoes the money as well, with
+                # no risk of double-counting against PAYMENTS.
                 if save_price and abs(price - cur_price) > 1e-9:
                     set_client_price(cid, pid, price)
                 log_change("B2B გატანა",
@@ -1867,7 +1942,11 @@ else:
         if not cl_map:
             st.info("ჯერ დაამატე კლიენტი.")
         else:
-            cname = st.selectbox("კლიენტი", list(cl_map.keys()), key="pay_client")
+            cname = st.selectbox("კლიენტი", list(cl_map.keys()), index=None,
+                                 placeholder="— აირჩიე კლიენტი —", key="pay_client")
+            if not cname:
+                st.info("აირჩიე კლიენტი, რომ გადახდის ფორმა გამოჩნდეს.")
+                st.stop()
             cid = cl_map[cname]
             bal = client_balance(cid, ship_df, pay_df)
             st.metric("მიმდინარე დავალიანება (₾)", f"{bal:g}")
@@ -1887,10 +1966,12 @@ else:
                 st.warning(f"⚠️ გადახდა ({amount:g} ₾) დავალიანებაზე ({bal:g} ₾) მეტია.")
                 st.error("დაადასტურე ქვედა გრაფა და ხელახლა შეინახე.")
             elif submitted:
+                pay_id = new_id("PAY")
                 append_row("PAYMENTS", {
-                    "Payment_ID": new_id("PAY"), "Date": str(p_date), "Client_ID": cid,
+                    "Payment_ID": pay_id, "Date": str(p_date), "Client_ID": cid,
                     "Amount_GEL": amount, "Method": method, "Shipment_ID": "",
                     "Notes": note, "Operator": st.session_state.get("operator", ""),
+                    "Ref_ID": pay_id,
                 })
                 log_change("B2B გადახდა", f"{cname}: {amount:g}₾ ({method})")
                 flash(f"ჩაწერილია. ახალი ბალანსი: {bal - amount:g} ₾")
@@ -1901,7 +1982,11 @@ else:
         if not cl_map:
             st.info("ჯერ დაამატე კლიენტი.")
         else:
-            cname = st.selectbox("კლიენტი", list(cl_map.keys()), key="as_client")
+            cname = st.selectbox("კლიენტი", list(cl_map.keys()), index=None,
+                                 placeholder="— აირჩიე კლიენტი —", key="as_client")
+            if not cname:
+                st.info("აირჩიე კლიენტი, რომ ინვენტარის ფორმა გამოჩნდეს.")
+                st.stop()
             cid = cl_map[cname]
             held = client_assets(cid, moves_df)
             k1, k2 = st.columns(2)
@@ -1935,15 +2020,45 @@ else:
                 st.warning(f"⚠️ დაბრუნება {qty} ცალი, მაგრამ მასთან {have:g} ირიცხება.")
                 st.error("დაადასტურე ქვედა გრაფა და ხელახლა შეინახე.")
             elif submitted:
+                mv_id = new_id("MOVE")
                 append_row("ASSET_MOVES", {
-                    "Move_ID": new_id("MOVE"), "Date": str(a_date), "Client_ID": cid,
+                    "Move_ID": mv_id, "Date": str(a_date), "Client_ID": cid,
                     "Asset_Type": atype, "Detail": detail, "Direction": direction,
                     "Qty": qty, "Notes": note,
-                    "Operator": st.session_state.get("operator", ""),
+                    "Operator": st.session_state.get("operator", ""), "Ref_ID": mv_id,
                 })
                 log_change("B2B ინვენტარი", f"{cname}: {atype} {direction} {qty} ცალი")
                 flash(f"{atype} — {direction} {qty} ცალი ჩაწერილია.")
                 st.rerun()
+
+    # ---------------- RECENT OPERATIONS ----------------
+    elif cl_tab == "🕓 ბოლო ოპერაციები":
+        st.caption("ბოლოს გაკეთებული ოპერაციები. წაშლა აუქმებს ერთ ოპერაციას "
+                   "მთლიანად — თანხასაც და კეგებსაც.")
+        ops = recent_operations()
+        if not ops:
+            st.info("ოპერაცია ჯერ არ არის.")
+        else:
+            st.dataframe(pd.DataFrame([{"თარიღი": o["date"], "ტიპი": o["kind"],
+                                        "კლიენტი": o["client"], "დეტალი": o["detail"]}
+                                       for o in ops]),
+                         use_container_width=True, hide_index=True)
+            st.divider()
+            st.markdown("#### 🗑️ ოპერაციის გაუქმება")
+            labels = {f"{o['date']} · {o['kind']} · {o['client']} · {o['detail']}": o["ref"]
+                      for o in ops}
+            pick_op = st.selectbox("აირჩიე გასაუქმებელი ოპერაცია", list(labels.keys()),
+                                   index=None, placeholder="— აირჩიე —", key="ops_pick")
+            if pick_op:
+                st.warning(f"გაუქმდება: **{pick_op}**  \nეს დააბრუნებს თანხასაც "
+                           f"და კეგებსაც. ქმედება შეუქცევადია.")
+                if st.checkbox("დიახ, ვაუქმებ ამ ოპერაციას", key="ops_confirm"):
+                    if st.button("🗑️ გაუქმება", key="ops_delete"):
+                        ref = labels[pick_op]
+                        n = delete_operation(ref)
+                        log_change("B2B ოპერაცია გაუქმდა", f"{pick_op} ({n} row)")
+                        flash(f"ოპერაცია გაუქმდა ({n} ჩანაწერი წაიშალა).")
+                        st.rerun()
 
     # ---------------- SETUP ----------------
     else:
