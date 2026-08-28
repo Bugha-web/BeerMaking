@@ -11,7 +11,7 @@ st.set_page_config(page_title="BUGHASHVILI Brew Journal", layout="wide")
 
 # Bump on every deploy. Shown in the sidebar so it is obvious at a glance
 # whether Streamlit Cloud is serving the latest build or a stale one.
-APP_VERSION = "v19 · 2026-08-14 · ანალიტიკა"
+APP_VERSION = "v20 · 2026-08-29 · ჭურჭლით გატანა"
 
 # ============================================================
 # GLOBAL DESIGN SYSTEM — one CSS block, loaded once for the whole app.
@@ -232,8 +232,10 @@ def recent_operations(limit=40):
         for _, r in ships.iterrows():
             sid = str(r.get("Shipment_ID"))
             kegs, back = _num(r.get("Kegs_Out")), _num(r.get("Kegs_Returned"))
+            vol = _num(r.get("Volume_L"))
             paid = _num(r.get("Paid_Now_GEL"))
-            bits = [f"{kegs:g} კეგი" if kegs else "", f"↩{back:g}" if back else "",
+            bits = [f"{kegs:g} კეგი" if kegs else (f"{vol:g}ლ (თავისი ჭურჭელი)" if vol else ""),
+                    f"↩{back:g}" if back else "",
                     f"{_num(r.get('Total_GEL')):g}₾",
                     f"გადახდილი {paid:g}₾" if paid else ""]
             ops.append({"ref": sid, "kind": "🚚 გატანა", "date": str(r.get("Date", "")),
@@ -2025,17 +2027,30 @@ else:
             k2.metric(f"{cname}-თან ახლა", f"{held_now:g}")
 
             cur_price = client_price(cid, pid, get_df("CLIENT_PRICES"), products_df)
+            sh_mode = st.radio("გატანის ტიპი", ["კეგით", "საკუთარი ჭურჭლით (ლიტრი)"],
+                               horizontal=True, key="sh_mode")
+            loose = sh_mode.startswith("საკუთარი")
             # in a form, so typing a value and hitting save works on the FIRST
             # click (outside a form the first click only commits the field)
             with st.form("b2b_shipment", clear_on_submit=True):
                 c3, c4, c5 = st.columns(3)
                 s_date = c3.date_input("თარიღი", value=date.today(), key="shf_date")
-                kegs = c4.number_input(f"წაიღო სავსე კეგი (×{ksize:g}ლ)",
-                                       min_value=0, step=1)
+                if loose:
+                    loose_l = c4.number_input("ლიტრი (საკუთარი ჭურჭელი)",
+                                              min_value=0.0, step=1.0)
+                    kegs = 0
+                else:
+                    kegs = c4.number_input(f"წაიღო სავსე კეგი (×{ksize:g}ლ)",
+                                           min_value=0, step=1)
+                    loose_l = 0.0
                 price = c5.number_input("ფასი ₾/ლ", min_value=0.0, step=0.1,
                                         value=float(cur_price))
                 c6, c7 = st.columns(2)
-                kegs_back = c6.number_input("დააბრუნა ცარიელი კეგი", min_value=0, step=1)
+                if loose:
+                    c6.caption("კეგის დაბრუნება არ ეხება ამ გატანას.")
+                    kegs_back = 0
+                else:
+                    kegs_back = c6.number_input("დააბრუნა ცარიელი კეგი", min_value=0, step=1)
                 # never assume payment: the debt is created by default and any
                 # payment is entered explicitly
                 paid_now = c7.number_input("ახლა გადაიხადა (₾)", min_value=0.0,
@@ -2048,21 +2063,23 @@ else:
                 submitted = st.form_submit_button("💾 გატანის ჩაწერა")
 
             if submitted:
-                vol = kegs * ksize
+                vol = loose_l if loose else kegs * ksize
                 total = round(vol * price, 2)
                 problems = [m for bad, m in [
                     (price > 100, f"ფასი {price:g} ₾/ლ — ჩვეულებრივზე ბევრად მეტია."),
                     (paid_now > total, f"გადახდილი ({paid_now:g} ₾) ჯამზე ({total:g} ₾) მეტია."),
-                    (kegs > free_now,
+                    (not loose and kegs > free_now,
                      f"წასაღებია {kegs} კეგი, ქარხანაში კი {free_now:g} თავისუფალია."),
-                    (kegs_back > held_now,
+                    (not loose and kegs_back > held_now,
                      f"აბრუნებს {kegs_back} კეგს, მაგრამ მასთან {held_now:g} ირიცხება."),
                 ] if bad]
             else:
                 vol = total = 0
                 problems = []
 
-            if submitted and kegs <= 0 and kegs_back <= 0:
+            if submitted and loose and loose_l <= 0:
+                st.error("შეავსე ლიტრაჟი.")
+            elif submitted and not loose and kegs <= 0 and kegs_back <= 0:
                 st.error("შეავსე კეგების რაოდენობა.")
             elif submitted and problems and not confirm_odd:
                 for m in problems:
@@ -2097,9 +2114,11 @@ else:
                 # no risk of double-counting against PAYMENTS.
                 if save_price and abs(price - cur_price) > 1e-9:
                     set_client_price(cid, pid, price)
+                qty_desc = f"{vol:g}ლ (თავისი ჭურჭელი)" if loose else f"{kegs} კეგი ({vol:g}ლ)"
                 log_change("B2B გატანა",
-                           f"{cname}: {pname} {kegs} კეგი ({vol:g}ლ) × {price:g}₾ = {total:g}₾, "
-                           f"გადახდილი {paid_now:g}₾, დააბრუნა {kegs_back}")
+                           f"{cname}: {pname} {qty_desc} × {price:g}₾ = {total:g}₾, "
+                           f"გადახდილი {paid_now:g}₾"
+                           + (f", დააბრუნა {kegs_back}" if kegs_back else ""))
                 rest = total - paid_now
                 flash(f"ჩაწერილია: {total:g} ₾"
                            + (f", ნაშთი {rest:g} ₾" if rest > 0 else ", სრულად გადახდილი"))
